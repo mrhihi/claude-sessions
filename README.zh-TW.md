@@ -121,7 +121,7 @@ claude-sessions mv <來源> <目標> [選項]
 
 - 搬移實體目錄。
 - 改名 `~/.claude/projects/` 下對應的資料夾。
-- 改寫 session jsonl 內的 `cwd`。
+- 改寫 session jsonl 內的目錄欄位：`cwd`、`relocatedCwd`、`projectPath`、`live_cwd`、`workingDirectory`、`realParentDir`（工具輸入輸出與訊息內文屬於歷史，不會動）。
 - 改寫 `history.jsonl` 與 `~/.claude.json`（兩者會先備份，見[備份](#備份)）。
 
 以下情況會拒絕：
@@ -133,6 +133,9 @@ claude-sessions mv <來源> <目標> [選項]
 | `目標` 在 `來源` 之內，或兩者相同 | 換一個路徑 |
 | 有 Claude Code 程序在 `來源` 或 `目標` 之內（會列出） | 先結束那些 session，或加 `--force` |
 
+- 與 `/bin/mv` 一致：`目標` 若是既有目錄，`來源` 會被搬進去（`mv proj ..` → `../proj`）；否則 `目標` 就是最終路徑，也就是改名，名稱改變時會印出提示。`目標` 含 `\` 會被拒絕（未加引號的 `\` 會被 shell 吃掉，`GSSCLI\GSSDRIVE` 會變成 `GSSCLIGSSDRIVE`）。
+- 更新後會用 Claude `/resume` 查找 session 的方式複驗（資料夾名稱由新路徑算出、紀錄的目錄），不一致就報錯。若目錄搬完後有步驟失敗，錯誤訊息會印出可完成後續的 `--no-move-files` 指令。
+- 在工具之外改名而被遺留的 session 會在 `doctor` 中顯示為孤兒；若同層只有一個相近名稱的目錄，會一併列出可能的新位置。
 - `--dry-run` 也會提醒：若有 Claude Code 在執行，真正執行時會被擋下。
 - 結束時會印出 `undo:` 一行。要還原搬移，反向再跑一次 `mv`（`claude-sessions mv <目標> <來源>`），資料夾、`cwd` 紀錄與 history 都會精確還原。
 

@@ -121,7 +121,7 @@ What it changes:
 
 - Moves the directory itself.
 - Renames the matching folders under `~/.claude/projects/`.
-- Rewrites `cwd` in the session jsonl files.
+- Rewrites the directory fields in the session jsonl files: `cwd`, `relocatedCwd`, `projectPath`, `live_cwd`, `workingDirectory`, `realParentDir` (tool inputs/outputs and message text are history and stay as they were).
 - Rewrites `history.jsonl` and `~/.claude.json` (both backed up first, see [Backups](#backups)).
 
 Refuses when:
@@ -133,6 +133,9 @@ Refuses when:
 | `DST` is inside `SRC`, or both are the same | Pick another path |
 | A Claude Code process runs inside `SRC` or `DST` (they are listed) | Exit those sessions, or pass `--force` |
 
+- Like `/bin/mv`: if `DST` is an existing directory, `SRC` is moved *into* it (`mv proj ..` → `../proj`). Otherwise `DST` is the final path, i.e. a rename; a note is printed when the name changes. A `\` in `DST` is refused (an unquoted `\` is dropped by the shell, so `GSSCLI\GSSDRIVE` becomes `GSSCLIGSSDRIVE`).
+- After the update it re-checks the result the way Claude's `/resume` looks sessions up (folder name from the new path, recorded directory) and fails loudly if they disagree. If a step fails after the directory was moved, the error prints the `--no-move-files` command that finishes the job.
+- Sessions left behind by a rename done outside the tool show up in `doctor` as orphans, with the likely new directory when there is a single similar sibling.
 - `--dry-run` also warns when a real run would be blocked by a running Claude Code.
 - It ends with an `undo:` line. To undo, run `mv` the other way round (`claude-sessions mv <DST> <SRC>`): folders, `cwd` records and history are restored exactly.
 

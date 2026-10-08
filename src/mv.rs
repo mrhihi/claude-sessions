@@ -50,21 +50,40 @@ pub fn rewrite_prefix(text: &str, key: &str, old: &str, new: &str) -> (String, u
     (out, n)
 }
 
+/// Record keys that hold a directory the session lives in, and that Claude reads back
+/// (`relocatedCwd` and `cwd` decide which folder a session belongs to in `/resume`).
+/// Tool inputs/outputs and message text are history and are left alone.
+pub(crate) const PATH_KEYS: &[&str] = &["cwd", "relocatedCwd", "projectPath", "live_cwd", "workingDirectory", "realParentDir"];
+
 /// Rewrites one file in place via a temp file, keeping permissions and mtime
 /// (Claude orders its resume list by mtime). Returns the number of replacements.
-pub(crate) fn rewrite_file(path: &Path, key: &str, old: &str, new: &str) -> Result<usize> {
-    let text = fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    let (out, n) = rewrite_prefix(&text, key, old, new);
+pub(crate) fn rewrite_file_keys(path: &Path, keys: &[&str], old: &str, new: &str) -> Result<usize> {
+    let mut text = fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut n = 0;
+    for key in keys {
+        let (out, k) = rewrite_prefix(&text, key, old, new);
+        text = out;
+        n += k;
+    }
     if n == 0 {
         return Ok(0);
     }
     let meta = fs::metadata(path)?;
     let tmp = path.with_extension("tmp-claude-sessions");
-    fs::write(&tmp, out)?;
+    fs::write(&tmp, text)?;
     fs::set_permissions(&tmp, meta.permissions())?;
     fs::File::options().write(true).open(&tmp)?.set_modified(meta.modified()?)?;
     fs::rename(&tmp, path)?;
     Ok(n)
+}
+
+pub(crate) fn rewrite_file(path: &Path, key: &str, old: &str, new: &str) -> Result<usize> {
+    rewrite_file_keys(path, &[key], old, new)
+}
+
+/// Rewrites every directory-valued record key of a session transcript.
+pub(crate) fn rewrite_session_file(path: &Path, old: &str, new: &str) -> Result<usize> {
+    rewrite_file_keys(path, PATH_KEYS, old, new)
 }
 
 /// Renames JSON object keys that are `old` or below it (`~/.claude.json` keeps
@@ -312,6 +331,9 @@ pub fn run(o: &Opts) -> Result<()> {
     }
 
     let steps = plan_steps(&o.claude_dir, &src, &dst)?;
+    if !o.no_move_files && src.file_name() != dst.file_name() {
+        eprintln!("{} the directory name changes ({} → {}); this is a rename, not a move into a folder", style::bold_yellow("note:"), folder(&src), folder(&dst));
+    }
 
     println!(
         "{} {} {} {}",
@@ -351,6 +373,15 @@ pub fn run(o: &Opts) -> Result<()> {
             );
         }
     }
+    if let Some(t) = trust_lost(&o.claude_dir, &src, &dst) {
+        println!(
+            "{} {} was trusted only through {}; {} is not covered, so Claude will ask \"Do you trust this folder?\" once. Sessions are not affected.",
+            style::bold_yellow("note:"),
+            src.display(),
+            t.display(),
+            dst.display()
+        );
+    }
     if o.dry_run {
         if !busy.is_empty() && !o.force {
             println!("{} a real run would stop here; exit those Claude sessions first (or use --force).", style::bold_yellow("Dry run:"));
@@ -370,31 +401,20 @@ pub fn run(o: &Opts) -> Result<()> {
         move_dir(&src, &dst)?;
         println!("{}", style::green("✔ Moved directory."));
     }
-    let mut rewritten = 0;
-    for s in &steps {
-        let mut files = Vec::new();
-        jsonl_files_recursive(&s.project.dir, &mut files);
-        for f in files {
-            rewritten += rewrite_file(&f, "cwd", &old, &new)?;
-        }
-        if s.new_dir != s.project.dir {
-            fs::rename(&s.project.dir, &s.new_dir)
-                .with_context(|| format!("cannot rename {}", s.project.dir.display()))?;
-        }
-    }
-    let mut backups = Vec::new();
-    let history = o.claude_dir.join("history.jsonl");
-    if history.is_file() && rewrite_prefix(&fs::read_to_string(&history)?, "project", &old, &new).1 > 0 {
-        backups.push(crate::sidecar::backup(&history)?);
-        rewrite_file(&history, "project", &old, &new)?;
-    }
-    if let Some((path, out, _)) = cj {
-        backups.push(apply_claude_json(&path, out)?);
-    }
-    println!("{}", style::green(&format!("✔ Updated {} session folder(s), {} cwd record(s).", steps.len(), rewritten)));
+    // The directory is already moved; if a later step fails, re-running with
+    // --no-move-files finishes the job (every rewrite is idempotent).
+    let (rewritten, backups) = update_sessions(o, &steps, &old, &new, cj).map_err(|e| {
+        e.context(format!(
+            "the sessions were not fully updated; finish with: claude-sessions mv --no-move-files {} {}",
+            shell_quote(&src),
+            shell_quote(&dst)
+        ))
+    })?;
+    println!("{}", style::green(&format!("✔ Updated {} session folder(s), {} path record(s).", steps.len(), rewritten)));
     for b in &backups {
         println!("  {} {}", style::dim("backup:"), style::dim(&b.display().to_string()));
     }
+    verify(&o.claude_dir, &steps, &src, &dst)?;
     let flag = if o.no_move_files { " --no-move-files" } else { "" };
     println!(
         "  {} claude-sessions mv {} {}{flag}{}",
@@ -404,6 +424,85 @@ pub fn run(o: &Opts) -> Result<()> {
         if o.no_move_files { style::dim("   (then move the directory back yourself)") } else { String::new() }
     );
     Ok(())
+}
+
+/// `mv`/`cp` semantics for the destination: an existing directory means "put it inside",
+/// anything else is the final path. A backslash is almost certainly a shell-eaten separator.
+pub fn resolve_dst(src: &Path, dst: PathBuf, sessions_only: bool) -> Result<PathBuf> {
+    if dst.to_string_lossy().contains('\\') {
+        bail!("destination {} contains a backslash; use '/' (or quote the path), an unquoted '\\' is dropped by the shell", dst.display());
+    }
+    if sessions_only || !dst.is_dir() {
+        return Ok(dst);
+    }
+    let name = resolve(src)?.file_name().map(|n| n.to_owned()).context("source has no directory name")?;
+    let inside = dst.join(name);
+    eprintln!("{} {} is an existing directory, moving into {}", style::bold_yellow("note:"), dst.display(), inside.display());
+    Ok(inside)
+}
+
+/// The closest directory at or above `p` that `~/.claude.json` marks as trusted
+/// (Claude's trust prompt is skipped when any parent is trusted).
+fn trusted_at_or_above(claude_dir: &Path, p: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(claude_json_path(claude_dir)?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let projects = v.get("projects")?.as_object()?;
+    p.ancestors()
+        .find(|a| projects.get(a.to_string_lossy().as_ref()).and_then(|e| e.get("hasTrustDialogAccepted")).and_then(|t| t.as_bool()) == Some(true))
+        .map(Path::to_path_buf)
+}
+
+/// Trust that `src` only had through a parent directory and `dst` will not have.
+/// (Trust stored on `src` itself or below moves along with the `.claude.json` keys.)
+fn trust_lost(claude_dir: &Path, src: &Path, dst: &Path) -> Option<PathBuf> {
+    let t = trusted_at_or_above(claude_dir, src).filter(|t| !t.starts_with(src))?;
+    trusted_at_or_above(claude_dir, dst).is_none().then_some(t)
+}
+
+type ClaudeJson = Option<(PathBuf, String, usize)>;
+
+fn update_sessions(o: &Opts, steps: &[Step], old: &str, new: &str, cj: ClaudeJson) -> Result<(usize, Vec<PathBuf>)> {
+    let mut rewritten = 0;
+    for s in steps {
+        let mut files = Vec::new();
+        jsonl_files_recursive(&s.project.dir, &mut files);
+        for f in files {
+            rewritten += rewrite_session_file(&f, old, new)?;
+        }
+        if s.new_dir != s.project.dir {
+            fs::rename(&s.project.dir, &s.new_dir)
+                .with_context(|| format!("cannot rename {}", s.project.dir.display()))?;
+        }
+    }
+    let mut backups = Vec::new();
+    let history = o.claude_dir.join("history.jsonl");
+    if history.is_file() && rewrite_prefix(&fs::read_to_string(&history)?, "project", old, new).1 > 0 {
+        backups.push(crate::sidecar::backup(&history)?);
+        rewrite_file(&history, "project", old, new)?;
+    }
+    if let Some((path, out, _)) = cj {
+        backups.push(apply_claude_json(&path, out)?);
+    }
+    Ok((rewritten, backups))
+}
+
+/// Re-reads the result the way Claude's `/resume` does: the folder must be named after
+/// the new directory and the sessions' recorded directory must be that directory.
+fn verify(claude_dir: &Path, steps: &[Step], src: &Path, dst: &Path) -> Result<()> {
+    let after = list_projects(claude_dir)?;
+    let mut bad = Vec::new();
+    for s in steps {
+        let rel = s.project.cwd.strip_prefix(src).unwrap_or(Path::new(""));
+        let want = if rel.as_os_str().is_empty() { dst.to_path_buf() } else { dst.join(rel) };
+        let ok = after.iter().any(|p| p.dir == s.new_dir && p.cwd == want) && encode_path(&want) == folder(&s.new_dir);
+        if !ok {
+            bad.push(format!("{} (expected folder {} for {})", folder(&s.new_dir), encode_path(&want), want.display()));
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    bail!("verification failed, Claude may not list these sessions: {}", bad.join("; "))
 }
 
 fn folder(p: &Path) -> String {
@@ -420,6 +519,22 @@ mod tests {
 
     fn rc(pid: u32, cwd: &str) -> RunningClaude {
         RunningClaude { pid, cwd: PathBuf::from(cwd), name: None }
+    }
+
+    #[test]
+    fn trust_through_a_parent_is_reported_as_lost_only_when_dst_is_outside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        fs::write(
+            tmp.path().join(".claude.json"),
+            r#"{"projects":{"/a":{"hasTrustDialogAccepted":true},"/a/b":{"hasTrustDialogAccepted":false},"/x/own":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        let (a_b, out, inside, own) = (Path::new("/a/b"), Path::new("/c/b"), Path::new("/a/z"), Path::new("/x/own"));
+        assert_eq!(trust_lost(&claude, a_b, out), Some(PathBuf::from("/a")));
+        assert_eq!(trust_lost(&claude, a_b, inside), None);
+        assert_eq!(trust_lost(&claude, own, out), None); // own trust moves with the key
     }
 
     #[test]

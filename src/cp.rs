@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
-use crate::mv::{jsonl_files_recursive, plan_steps, rewrite_file};
+use crate::mv::{jsonl_files_recursive, plan_steps, rewrite_session_file};
 use crate::scan::{resolve, session_files};
 use crate::style;
 
@@ -97,7 +97,7 @@ pub fn run(o: &Opts) -> Result<()> {
         jsonl_files_recursive(&s.new_dir, &mut files);
         for f in files {
             // Only the copy is rewritten, so the original sessions keep pointing at `src`.
-            rewritten += match rewrite_file(&f, "cwd", &old, &new) {
+            rewritten += match rewrite_session_file(&f, &old, &new) {
                 Ok(n) => n,
                 Err(e) => {
                     let _ = fs::remove_dir_all(&s.new_dir);

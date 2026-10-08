@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use claude_sessions::{encode::encode_path, mv, report};
 
@@ -152,4 +152,62 @@ fn mv_makes_own_backups_and_running_it_backwards_restores_everything() {
     run(&b, &a); // what the printed "undo:" line says to do
     assert_eq!(snapshot(&claude), before, "session files, history and .claude.json are back byte for byte");
     assert!(a.join("sub/f.txt").exists() && !b.exists());
+}
+
+#[test]
+fn mv_rewrites_every_directory_key_but_not_history_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let (src, dst) = (root.join("old"), root.join("new"));
+    fs::create_dir_all(&src).unwrap();
+    let dir = claude.join("projects").join(encode_path(&src));
+    fs::create_dir_all(&dir).unwrap();
+    let s = src.to_string_lossy();
+    let lines = [
+        format!(r#"{{"type":"user","cwd":"{s}","live_cwd":"{s}","projectPath":"{s}"}}"#),
+        format!(r#"{{"type":"relocated","relocatedCwd":"{s}/sub","workingDirectory":"{s}","realParentDir":"{s}"}}"#),
+        format!(r#"{{"type":"assistant","file_path":"{s}/f.txt","text":"cwd is {s}"}}"#),
+    ];
+    fs::write(dir.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
+
+    mv::run(&mv::Opts { claude_dir: claude.clone(), src: src.clone(), dst: dst.clone(), dry_run: false, no_move_files: true, force: false }).unwrap_err(); // dst missing
+    fs::create_dir_all(&dst).unwrap();
+    mv::run(&mv::Opts { claude_dir: claude.clone(), src: src.clone(), dst: dst.clone(), dry_run: false, no_move_files: true, force: false }).unwrap();
+
+    let text = fs::read_to_string(claude.join("projects").join(encode_path(&dst)).join("s1.jsonl")).unwrap();
+    let d = dst.to_string_lossy();
+    for key in ["cwd", "live_cwd", "projectPath", "workingDirectory", "realParentDir"] {
+        assert!(text.contains(&format!(r#""{key}":"{d}""#)), "{key} not rewritten");
+    }
+    assert!(text.contains(&format!(r#""relocatedCwd":"{d}/sub""#)));
+    assert!(text.contains(&format!(r#""file_path":"{s}/f.txt""#)), "tool input must stay");
+}
+
+#[test]
+fn mv_long_path_uses_claudes_truncated_hashed_folder_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let src = root.join("a".repeat(120)).join("b".repeat(120));
+    let dst = root.join("c".repeat(120)).join("d".repeat(120));
+    fs::create_dir_all(&src).unwrap();
+    session(&claude, &src, "s1");
+    mv::run(&mv::Opts { claude_dir: claude.clone(), src, dst: dst.clone(), dry_run: false, no_move_files: false, force: false }).unwrap();
+    let name = encode_path(&dst);
+    assert!(name.len() > 200 && claude.join("projects").join(name).join("s1.jsonl").is_file());
+}
+
+#[test]
+fn resolve_dst_moves_into_existing_directory_like_mv() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let (src, parent) = (root.join("proj"), root.join("parent"));
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&parent).unwrap();
+    assert_eq!(mv::resolve_dst(&src, parent.clone(), false).unwrap(), parent.join("proj"));
+    assert_eq!(mv::resolve_dst(&src, parent.clone(), true).unwrap(), parent); // --no-move-files: as given
+    let fresh = root.join("fresh");
+    assert_eq!(mv::resolve_dst(&src, fresh.clone(), false).unwrap(), fresh); // rename
+    assert!(mv::resolve_dst(&src, PathBuf::from("a\\b"), false).is_err());
 }

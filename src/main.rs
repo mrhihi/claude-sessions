@@ -199,9 +199,11 @@ fn run(cli: Cli) -> Result<()> {
     };
     match cli.cmd {
         Some(Cmd::Mv { src, dst, dry_run, no_move_files, force }) => {
+            let dst = mv::resolve_dst(&src, dst, no_move_files)?;
             mv::run(&mv::Opts { claude_dir, src, dst, dry_run, no_move_files, force })
         }
         Some(Cmd::Cp { src, dst, dry_run, no_copy_files }) => {
+            let dst = mv::resolve_dst(&src, dst, no_copy_files)?;
             cp::run(&cp::Opts { claude_dir, src, dst, dry_run, no_copy_files })
         }
         Some(Cmd::Export { id, format, output }) => {

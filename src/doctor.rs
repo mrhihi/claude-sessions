@@ -19,6 +19,26 @@ pub struct Orphan {
     pub cwd: String,
     pub sessions: usize,
     pub bytes: u64,
+    /// An existing sibling directory whose name overlaps the missing one (e.g. `AB` vs `B`),
+    /// the usual sign of a directory renamed or moved without its sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub likely_new: Option<String>,
+}
+
+/// The only existing sibling of `cwd` whose name contains, or is contained in, the missing name.
+fn likely_new_dir(cwd: &Path) -> Option<PathBuf> {
+    let name = cwd.file_name()?.to_string_lossy().to_lowercase();
+    let mut found = fs::read_dir(cwd.parent()?)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n != name && n.len() >= 3 && (name.contains(&n) || n.contains(&name))
+        })
+        .map(|e| e.path());
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
 }
 
 /// A path recorded in `history.jsonl` or `.claude.json` that no longer exists.
@@ -133,6 +153,7 @@ pub fn diagnose(claude_dir: &Path) -> Result<Diagnosis> {
                 cwd: p.cwd.display().to_string(),
                 sessions: files.len(),
                 bytes: files.iter().filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum(),
+                likely_new: likely_new_dir(&p.cwd).map(|n| n.display().to_string()),
             });
         }
     }
@@ -337,6 +358,9 @@ pub fn print_text(d: &Diagnosis) {
                 style::cyan(&o.cwd),
                 style::dim(&format!("({})", o.folder))
             );
+            if let Some(n) = &o.likely_new {
+                println!("      {} maybe now {}: {}", style::dim("→"), style::green(n), style::bold(&format!("claude-sessions mv --no-move-files '{}' '{n}'", o.cwd)));
+            }
         }
         println!(
             "  {} moved by hand? {}   gone for good? {}\n",
