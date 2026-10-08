@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::scan::{is_excluded, list_projects, session_files};
+use crate::scan::{is_excluded, list_projects, session_files, strip_prefix_ci};
 use crate::stats::{Agg, SessionStat, analyze_session};
 use crate::style;
 
@@ -29,7 +29,8 @@ pub fn build(claude_dir: &Path, base: &Path, excludes: &[String]) -> Result<Repo
     let mut projects = Vec::new();
     let mut total = Agg::default();
     for p in list_projects(claude_dir)? {
-        let Ok(rel) = p.cwd.strip_prefix(base) else { continue };
+        let Some(rel) = strip_prefix_ci(&p.cwd, base) else { continue };
+        let rel = rel.as_path();
         if is_excluded(rel, excludes) {
             continue;
         }

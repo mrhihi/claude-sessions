@@ -123,6 +123,26 @@ pub fn resolve(p: &Path) -> Result<PathBuf> {
     }
 }
 
+/// `path` relative to `base`. Falls back to a case-insensitive match when the two
+/// spellings reach the same directory (case-insensitive filesystems record the same
+/// folder as `gsscli` and `GSSCLI`).
+pub fn strip_prefix_ci(path: &Path, base: &Path) -> Option<PathBuf> {
+    if let Ok(r) = path.strip_prefix(base) {
+        return Some(r.to_path_buf());
+    }
+    let lower = |c: std::path::Component| c.as_os_str().to_string_lossy().to_lowercase();
+    let n = base.components().count();
+    let mut pc = path.components();
+    let head: PathBuf = pc.by_ref().take(n).collect();
+    if head.components().count() != n || !head.components().map(lower).eq(base.components().map(lower)) {
+        return None;
+    }
+    match (head.canonicalize(), base.canonicalize()) {
+        (Ok(a), Ok(b)) if a == b => Some(pc.collect()),
+        _ => None,
+    }
+}
+
 /// True if any component of `rel` is in the exclude list.
 pub fn is_excluded(rel: &Path, excludes: &[String]) -> bool {
     rel.components()
@@ -132,6 +152,19 @@ pub fn is_excluded(rel: &Path, excludes: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_prefix_ci_folds_case_only_for_the_same_directory() {
+        let t = std::env::temp_dir().join(format!("cs-ci-{}", std::process::id()));
+        std::fs::create_dir_all(t.join("Proj/sub")).unwrap();
+        let up = t.join("PROJ");
+        let exact = t.join("Proj");
+        assert_eq!(strip_prefix_ci(&exact.join("sub"), &exact), Some(PathBuf::from("sub")));
+        assert_eq!(strip_prefix_ci(&t.join("Proj2"), &exact), None);
+        let ci = up.exists(); // case-insensitive filesystem?
+        assert_eq!(strip_prefix_ci(&up.join("sub"), &exact), ci.then(|| PathBuf::from("sub")));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
 
     #[test]
     fn exclusion_matches_any_component() {

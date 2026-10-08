@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use crate::mv::{conflicts, running_claudes};
-use crate::scan::{list_projects, resolve, session_files};
+use crate::scan::{list_projects, resolve, session_files, strip_prefix_ci};
 use crate::sidecar::{self, Edit, count_files, path_size, remove_path, session_ids, sidecar_paths};
 use crate::stats::analyze_session;
 use crate::style;
@@ -68,7 +68,7 @@ pub fn plan(o: &Opts) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     for p in list_projects(&o.claude_dir)? {
         match &base {
-            Some(b) if !p.cwd.starts_with(b) => continue,
+            Some(b) if strip_prefix_ci(&p.cwd, b).is_none() => continue,
             None if p.cwd.exists() => continue,
             _ => {}
         }
