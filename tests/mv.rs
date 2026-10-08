@@ -1,0 +1,155 @@
+use std::fs;
+use std::path::Path;
+
+use claude_sessions::{encode::encode_path, mv, report};
+
+fn session(claude: &Path, cwd: &Path, id: &str) {
+    let dir = claude.join("projects").join(encode_path(cwd));
+    fs::create_dir_all(&dir).unwrap();
+    let line = format!(
+        r#"{{"type":"user","cwd":{},"timestamp":"2026-01-01T00:00:00Z","message":{{"content":"hi"}}}}"#,
+        serde_json::to_string(&cwd.to_string_lossy()).unwrap()
+    );
+    fs::write(dir.join(format!("{id}.jsonl")), line + "\n").unwrap();
+}
+
+#[test]
+fn mv_carries_sessions_of_dir_and_subdirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let src = root.join("my proj");
+    let sub = src.join("sub.dir");
+    let dst = root.join("moved/new_name");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("f.txt"), "x").unwrap();
+    session(&claude, &src, "s1");
+    session(&claude, &sub, "s2");
+    session(&claude, &src.join(".git"), "s3");
+    fs::write(
+        claude.join("history.jsonl"),
+        format!("{{\"project\":{},\"sessionId\":\"s1\"}}\n", serde_json::to_string(&src.to_string_lossy()).unwrap()),
+    )
+    .unwrap();
+
+    let opts = |dry_run| mv::Opts {
+        claude_dir: claude.clone(),
+        src: src.clone(),
+        dst: dst.clone(),
+        dry_run,
+        no_move_files: false,
+        force: false,
+    };
+    mv::run(&opts(true)).unwrap();
+    assert!(src.exists() && !dst.exists());
+
+    let ex = vec![".git".to_string()];
+    let before = report::build(&claude, &src, &ex).unwrap();
+    assert_eq!(before.total.sessions, 2); // .git excluded
+
+    mv::run(&opts(false)).unwrap();
+    assert!(!src.exists());
+    assert!(dst.join("sub.dir/f.txt").exists());
+
+    assert_eq!(report::build(&claude, &src, &ex).unwrap().total.sessions, 0);
+    let after = report::build(&claude, &dst, &ex).unwrap();
+    assert_eq!(after.total.sessions, 2);
+    assert_eq!(report::build(&claude, &dst, &[]).unwrap().total.sessions, 3); // .git session moved too
+    assert!(claude.join("projects").join(encode_path(&dst)).is_dir());
+    let hist = fs::read_to_string(claude.join("history.jsonl")).unwrap();
+    assert!(hist.contains("new_name"));
+}
+
+fn lstart(pid: u32) -> String {
+    let o = std::process::Command::new("ps").env("TZ", "UTC").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+fn fake_claude(claude: &Path, pid: u32, cwd: &Path, proc_start: &str) {
+    let dir = claude.join("sessions");
+    fs::create_dir_all(&dir).unwrap();
+    let body = serde_json::json!({"pid": pid, "cwd": cwd, "procStart": proc_start, "name": "fake"});
+    fs::write(dir.join(format!("{pid}.json")), body.to_string()).unwrap();
+}
+
+#[test]
+fn mv_refuses_when_claude_runs_inside_unless_forced_or_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let src = root.join("proj");
+    let dst = root.join("proj2");
+    fs::create_dir_all(src.join("deep")).unwrap();
+    session(&claude, &src, "s1");
+    let me = std::process::id(); // a live pid standing in for Claude
+
+    let opts = |force| mv::Opts {
+        claude_dir: claude.clone(),
+        src: src.clone(),
+        dst: dst.clone(),
+        dry_run: false,
+        no_move_files: false,
+        force,
+    };
+
+    // stale file: recorded start time doesn't match the live pid -> ignored, move succeeds
+    fake_claude(&claude, me, &src.join("deep"), "Mon Jan  1 00:00:00 2001");
+    assert!(mv::running_claudes(&claude).iter().all(|r| r.pid != me));
+
+    // live: matching start time, cwd inside src -> refused, nothing moved
+    fake_claude(&claude, me, &src.join("deep"), &lstart(me));
+    assert!(mv::running_claudes(&claude).iter().any(|r| r.pid == me));
+    assert!(mv::run(&opts(false)).is_err());
+    assert!(src.exists() && !dst.exists());
+
+    // --force goes through
+    mv::run(&opts(true)).unwrap();
+    assert!(dst.exists() && !src.exists());
+}
+
+fn snapshot(claude: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, root, out);
+            } else if !p.file_name().unwrap().to_string_lossy().contains(".claude-sessions-") {
+                out.push((p.strip_prefix(root).unwrap().display().to_string(), fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(claude, claude, &mut v);
+    v.sort();
+    v
+}
+
+#[test]
+fn mv_makes_own_backups_and_running_it_backwards_restores_everything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let (a, sub, b) = (root.join("a dir"), root.join("a dir/sub"), root.join("b"));
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("f.txt"), "x").unwrap();
+    session(&claude, &a, "s1");
+    session(&claude, &sub, "s2");
+    let q = |p: &Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
+    fs::write(claude.join("history.jsonl"), format!("{{\"project\":{},\"sessionId\":\"s1\"}}\n", q(&a))).unwrap();
+    fs::write(claude.join(".claude.json"), format!("{{\"projects\":{{{}:{{\"x\":1}}}}}}", q(&a))).unwrap();
+    let before = snapshot(&claude);
+
+    let run = |src: &Path, dst: &Path| {
+        mv::run(&mv::Opts { claude_dir: claude.clone(), src: src.into(), dst: dst.into(), dry_run: false, no_move_files: false, force: false }).unwrap()
+    };
+    run(&a, &b);
+    assert_ne!(snapshot(&claude), before, "the move changed the records");
+    let names: Vec<String> = fs::read_dir(&claude).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().any(|n| n.starts_with("history.jsonl.claude-sessions-") && n.ends_with(".bak")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with(".claude.json.claude-sessions-") && n.ends_with(".bak")), "{names:?}");
+    assert!(!names.iter().any(|n| n == "history.jsonl.bak" || n == ".claude.json.bak"), "{names:?}");
+
+    run(&b, &a); // what the printed "undo:" line says to do
+    assert_eq!(snapshot(&claude), before, "session files, history and .claude.json are back byte for byte");
+    assert!(a.join("sub/f.txt").exists() && !b.exists());
+}
