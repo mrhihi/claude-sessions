@@ -356,3 +356,13 @@ claude-sessions tui
 | `doctor --fix` | …完整還原：只移除了失效紀錄，沒有刪任何 session。 |
 | `rm` / `clean --purge-config` | …只能找回「被移除了什麼」的**紀錄**。session 本身已永久刪除，還原的 history 行會指向已不存在的對話。 |
 | `mv` | …光靠備份不夠：session 檔裡被改寫的 `cwd` 與改名的資料夾沒有備份。請改用 `claude-sessions mv <新> <舊>` 還原。 |
+
+## 發行（維護者）
+
+```sh
+cargo xtask version              # 目前版本、最新 tag、建議的下個版本
+cargo xtask release 0.2.0 -n     # 乾跑：執行所有檢查，不做任何變更
+cargo xtask release 0.2.0        # 更新 Cargo.toml、commit、建立 v0.2.0 tag 並推送
+```
+
+推送 tag 會觸發 `.github/workflows/release.yml`，建置 macOS Apple Silicon 與 Windows 執行檔並附加到 GitHub Release。加上 `-y` 可略過確認提示。

@@ -356,3 +356,13 @@ What a backup can bring back:
 | `doctor --fix` | …fully undoes it: only stale records were removed, no session was deleted. |
 | `rm` / `clean --purge-config` | …only restores a *record* of what was removed. The sessions themselves are deleted for good, so the restored history lines point at conversations that no longer exist. |
 | `mv` | …is not enough on its own: the rewritten `cwd` in the session files and the renamed folders are not backed up. Undo it with `claude-sessions mv <dst> <src>` instead. |
+
+## Releasing (maintainers)
+
+```sh
+cargo xtask version              # current version, latest tag, suggested next version
+cargo xtask release 0.2.0 -n     # dry run: run every check, change nothing
+cargo xtask release 0.2.0        # bump Cargo.toml, commit, tag v0.2.0 and push
+```
+
+Pushing the tag triggers `.github/workflows/release.yml`, which builds the macOS Apple Silicon and Windows binaries and attaches them to the GitHub Release. Add `-y` to skip the confirmation prompt.
