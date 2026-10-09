@@ -73,6 +73,7 @@ fn fake_claude(claude: &Path, pid: u32, cwd: &Path, proc_start: &str) {
 }
 
 #[test]
+#[cfg(unix)] // detecting running claude processes relies on ps/pgrep
 fn mv_refuses_when_claude_runs_inside_unless_forced_or_stale() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -163,11 +164,17 @@ fn mv_rewrites_every_directory_key_but_not_history_text() {
     fs::create_dir_all(&src).unwrap();
     let dir = claude.join("projects").join(encode_path(&src));
     fs::create_dir_all(&dir).unwrap();
-    let s = src.to_string_lossy();
+    // Paths as they appear inside JSON text: backslashes escaped, `sep` joins a sub-path.
+    let esc = |p: &Path| {
+        let q = serde_json::to_string(&p.to_string_lossy()).unwrap();
+        q[1..q.len() - 1].to_string()
+    };
+    let sep = if cfg!(windows) { "\\\\" } else { "/" };
+    let s = esc(&src);
     let lines = [
         format!(r#"{{"type":"user","cwd":"{s}","live_cwd":"{s}","projectPath":"{s}"}}"#),
-        format!(r#"{{"type":"relocated","relocatedCwd":"{s}/sub","workingDirectory":"{s}","realParentDir":"{s}"}}"#),
-        format!(r#"{{"type":"assistant","file_path":"{s}/f.txt","text":"cwd is {s}"}}"#),
+        format!(r#"{{"type":"relocated","relocatedCwd":"{s}{sep}sub","workingDirectory":"{s}","realParentDir":"{s}"}}"#),
+        format!(r#"{{"type":"assistant","file_path":"{s}{sep}f.txt","text":"cwd is {s}"}}"#),
     ];
     fs::write(dir.join("s1.jsonl"), lines.join("\n") + "\n").unwrap();
 
@@ -176,12 +183,12 @@ fn mv_rewrites_every_directory_key_but_not_history_text() {
     mv::run(&mv::Opts { claude_dir: claude.clone(), src: src.clone(), dst: dst.clone(), dry_run: false, no_move_files: true, force: false }).unwrap();
 
     let text = fs::read_to_string(claude.join("projects").join(encode_path(&dst)).join("s1.jsonl")).unwrap();
-    let d = dst.to_string_lossy();
+    let d = esc(&dst);
     for key in ["cwd", "live_cwd", "projectPath", "workingDirectory", "realParentDir"] {
         assert!(text.contains(&format!(r#""{key}":"{d}""#)), "{key} not rewritten");
     }
-    assert!(text.contains(&format!(r#""relocatedCwd":"{d}/sub""#)));
-    assert!(text.contains(&format!(r#""file_path":"{s}/f.txt""#)), "tool input must stay");
+    assert!(text.contains(&format!(r#""relocatedCwd":"{d}{sep}sub""#)));
+    assert!(text.contains(&format!(r#""file_path":"{s}{sep}f.txt""#)), "tool input must stay");
 }
 
 #[test]
@@ -209,5 +216,8 @@ fn resolve_dst_moves_into_existing_directory_like_mv() {
     assert_eq!(mv::resolve_dst(&src, parent.clone(), true).unwrap(), parent); // --no-move-files: as given
     let fresh = root.join("fresh");
     assert_eq!(mv::resolve_dst(&src, fresh.clone(), false).unwrap(), fresh); // rename
-    assert!(mv::resolve_dst(&src, PathBuf::from("a\\b"), false).is_err());
+    // A backslash is only suspicious where it is not the path separator.
+    if cfg!(unix) {
+        assert!(mv::resolve_dst(&src, PathBuf::from("a\\b"), false).is_err());
+    }
 }
