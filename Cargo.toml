@@ -1,6 +1,6 @@
 [package]
 name = "claude-sessions"
-version = "0.2.0-rc1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Per-directory Claude Code session stats, and move a directory together with its sessions"
