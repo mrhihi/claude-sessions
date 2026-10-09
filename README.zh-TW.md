@@ -27,10 +27,34 @@ cargo install --git https://github.com/mrhihi/claude-sessions --force        # �
 
 ### 預編譯執行檔
 
-不需安裝 Rust：到 [Releases](https://github.com/mrhihi/claude-sessions/releases) 頁面下載對應平台的壓縮檔。
+不需安裝 Rust：到 [Releases](https://github.com/mrhihi/claude-sessions/releases) 頁面下載對應平台的壓縮檔，解壓縮後把 `claude-sessions` 放到 `PATH` 內的資料夾。壓縮檔解開會得到一個資料夾，內含執行檔、授權文件與 README。下面的 `v0.2.0` 請換成你下載的版本。
 
-- macOS Apple Silicon：`claude-sessions-<tag>-aarch64-apple-darwin.tar.gz`（未簽章；若被擋下，執行 `xattr -d com.apple.quarantine claude-sessions`）
-- Windows x64：`claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`
+**macOS Apple Silicon**（`claude-sessions-<tag>-aarch64-apple-darwin.tar.gz`）
+
+```sh
+tar xzf claude-sessions-v0.2.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin
+cp claude-sessions-v0.2.0-aarch64-apple-darwin/claude-sessions ~/.local/bin/
+xattr -d com.apple.quarantine ~/.local/bin/claude-sessions   # 執行檔未簽章，解除 Gatekeeper 封鎖
+claude-sessions --version
+```
+
+若找不到 `claude-sessions`，在 `~/.zshrc` 加一行 `export PATH="$HOME/.local/bin:$PATH"`，再開新的終端機。
+
+**Windows x64**（`claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`），在 PowerShell 執行：
+
+```powershell
+Expand-Archive claude-sessions-v0.2.0-x86_64-pc-windows-msvc.zip .
+New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
+Copy-Item claude-sessions-v0.2.0-x86_64-pc-windows-msvc\claude-sessions.exe "$HOME\bin\"
+# 只需做一次：把該資料夾加入使用者 PATH，然後開新的終端機
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$HOME\bin", "User")
+claude-sessions --version
+```
+
+執行檔未簽章，第一次執行時 Windows SmartScreen 可能會警告：選「其他資訊」→「仍要執行」。
+
+要驗證下載檔，可與同一個 Release 的 `SHA256SUMS` 比對（macOS：`shasum -a 256 <檔案>`；Windows：`Get-FileHash <檔案>`）。
 
 ## 快速開始
 

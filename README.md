@@ -27,10 +27,34 @@ cargo install --git https://github.com/mrhihi/claude-sessions --force        # u
 
 ### Prebuilt binaries
 
-No Rust needed: download the archive for your platform from the [Releases](https://github.com/mrhihi/claude-sessions/releases) page.
+No Rust needed: download the archive for your platform from the [Releases](https://github.com/mrhihi/claude-sessions/releases) page, extract it and put `claude-sessions` on your `PATH`. Each archive unpacks to a folder holding the binary, the license and the READMEs. Replace `v0.2.0` below with the version you downloaded.
 
-- macOS Apple Silicon: `claude-sessions-<tag>-aarch64-apple-darwin.tar.gz` (unsigned; if blocked, run `xattr -d com.apple.quarantine claude-sessions`)
-- Windows x64: `claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`
+**macOS Apple Silicon** (`claude-sessions-<tag>-aarch64-apple-darwin.tar.gz`)
+
+```sh
+tar xzf claude-sessions-v0.2.0-aarch64-apple-darwin.tar.gz
+mkdir -p ~/.local/bin
+cp claude-sessions-v0.2.0-aarch64-apple-darwin/claude-sessions ~/.local/bin/
+xattr -d com.apple.quarantine ~/.local/bin/claude-sessions   # the binary is unsigned; clears the Gatekeeper block
+claude-sessions --version
+```
+
+If `claude-sessions` is not found, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` and open a new terminal.
+
+**Windows x64** (`claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`), in PowerShell:
+
+```powershell
+Expand-Archive claude-sessions-v0.2.0-x86_64-pc-windows-msvc.zip .
+New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
+Copy-Item claude-sessions-v0.2.0-x86_64-pc-windows-msvc\claude-sessions.exe "$HOME\bin\"
+# one-time: add that folder to your user PATH, then open a new terminal
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$HOME\bin", "User")
+claude-sessions --version
+```
+
+The binary is unsigned, so Windows SmartScreen may warn on first run: choose "More info" → "Run anyway".
+
+To verify a download, compare it with `SHA256SUMS` from the same release (`shasum -a 256 <file>` on macOS, `Get-FileHash <file>` on Windows).
 
 ## Quick start
 
