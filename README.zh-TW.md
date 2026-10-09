@@ -25,6 +25,13 @@ cargo install --git https://github.com/mrhihi/claude-sessions --force        # �
 - 執行檔會放在 `~/.cargo/bin/claude-sessions`（rustup 已把該目錄加入 PATH）。
 - 支援 macOS 與 Linux。
 
+### 預編譯執行檔
+
+不需安裝 Rust：到 [Releases](https://github.com/mrhihi/claude-sessions/releases) 頁面下載對應平台的壓縮檔。
+
+- macOS Apple Silicon：`claude-sessions-<tag>-aarch64-apple-darwin.tar.gz`（未簽章；若被擋下，執行 `xattr -d com.apple.quarantine claude-sessions`）
+- Windows x64：`claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`
+
 ## 快速開始
 
 ```sh

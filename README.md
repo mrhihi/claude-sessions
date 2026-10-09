@@ -25,6 +25,13 @@ cargo install --git https://github.com/mrhihi/claude-sessions --force        # u
 - The binary is placed in `~/.cargo/bin/claude-sessions` (rustup adds that directory to your PATH).
 - Supported on macOS and Linux.
 
+### Prebuilt binaries
+
+No Rust needed: download the archive for your platform from the [Releases](https://github.com/mrhihi/claude-sessions/releases) page.
+
+- macOS Apple Silicon: `claude-sessions-<tag>-aarch64-apple-darwin.tar.gz` (unsigned; if blocked, run `xattr -d com.apple.quarantine claude-sessions`)
+- Windows x64: `claude-sessions-<tag>-x86_64-pc-windows-msvc.zip`
+
 ## Quick start
 
 ```sh
