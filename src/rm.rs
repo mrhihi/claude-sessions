@@ -401,7 +401,8 @@ mod tests {
         o.purge_config = true;
         run(&o).unwrap();
         let cj = fs::read_to_string(claude.join(".claude.json")).unwrap();
-        assert!(cj.contains(&alive.display().to_string()));
+        let cj: serde_json::Value = serde_json::from_str(&cj).unwrap();
+        assert!(cj["projects"].as_object().unwrap().contains_key(&alive.display().to_string()));
         let h = fs::read_to_string(claude.join("history.jsonl")).unwrap();
         assert!(!h.contains("\"old\"") && h.contains("zzz"));
     }

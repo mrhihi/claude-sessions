@@ -485,7 +485,16 @@ mod tests {
 
     fn age(p: &Path, days: u64) {
         let t = SystemTime::now() - Duration::from_secs(days * 86_400);
-        fs::File::open(p).unwrap().set_modified(t).unwrap();
+        let mut o = fs::File::options();
+        // Windows needs write access to set times, and backup semantics to open a directory.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            o.access_mode(0x100).custom_flags(0x0200_0000); // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS
+        }
+        #[cfg(not(windows))]
+        o.read(true);
+        o.open(p).unwrap().set_modified(t).unwrap();
     }
 
     /// An orphan project, a live project, per-session data (old / kept / brand new / live),

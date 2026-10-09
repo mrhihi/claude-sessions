@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Result, bail};
 
@@ -17,13 +16,45 @@ pub struct Opts {
     pub no_copy_files: bool,
 }
 
+/// Recursively copies `src` to `dst`, keeping file permissions, modification times and
+/// (on unix) symlinks, like `cp -a`.
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let (from, to) = (entry.path(), dst.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if kind.is_symlink() {
+            copy_symlink(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+            fs::File::options().write(true).open(&to)?.set_modified(fs::metadata(&from)?.modified()?)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(from: &Path, to: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(from)?, to)?;
+    Ok(())
+}
+
+/// Creating symlinks needs elevated rights on Windows, so copy what the link points at.
+#[cfg(not(unix))]
+fn copy_symlink(from: &Path, to: &Path) -> Result<()> {
+    if from.is_dir() { copy_tree(from, to) } else { fs::copy(from, to).map(|_| ()).map_err(Into::into) }
+}
+
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
-    if !Command::new("cp").arg("-a").arg(src).arg(dst).status()?.success() {
+    if let Err(e) = copy_tree(src, dst) {
         let _ = fs::remove_dir_all(dst);
-        bail!("cp -a {} -> {} failed", src.display(), dst.display());
+        bail!("copying {} -> {} failed: {e}", src.display(), dst.display());
     }
     Ok(())
 }
@@ -115,6 +146,11 @@ mod tests {
     use super::*;
     use crate::encode::encode_path;
 
+    fn cwd_of(session: &Path) -> String {
+        let v: serde_json::Value = serde_json::from_str(fs::read_to_string(session).unwrap().trim()).unwrap();
+        v["cwd"].as_str().unwrap().to_string()
+    }
+
     #[test]
     fn copies_dir_and_sessions_without_touching_originals() {
         let tmp = tempfile::tempdir().unwrap();
@@ -137,9 +173,9 @@ mod tests {
         run(&o(false)).unwrap();
         assert!(dst.join("f.txt").exists());
         let new_sub = claude.join("projects").join(encode_path(&dst.join("sub"))).join("s.jsonl");
-        assert!(fs::read_to_string(new_sub).unwrap().contains(&dst.join("sub").display().to_string()));
+        assert_eq!(cwd_of(&new_sub), dst.join("sub").display().to_string());
         let old = claude.join("projects").join(encode_path(&src)).join("s.jsonl");
-        assert!(fs::read_to_string(old).unwrap().contains(&src.display().to_string()));
+        assert_eq!(cwd_of(&old), src.display().to_string());
         assert!(run(&o(false)).is_err(), "second copy must refuse to overwrite");
     }
 }
