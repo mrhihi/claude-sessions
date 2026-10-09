@@ -61,6 +61,7 @@ To verify a download, compare it with `SHA256SUMS` from the same release (`shasu
 ```sh
 claude-sessions                  # stats for the current directory (including subdirectories)
 claude-sessions ~/projects       # stats for a given directory
+claude-sessions --all            # every directory Claude Code has run in on this machine
 claude-sessions -s               # also list every session
 claude-sessions --since 7d       # only sessions active in the last 7 days
 claude-sessions mv <src> <dst>   # move a directory together with its sessions
@@ -71,7 +72,7 @@ claude-sessions tui              # browse and manage sessions interactively
 
 | Command | Purpose |
 |---|---|
-| `claude-sessions [PATH]` | Stats for a directory and its subdirectories (default mode) |
+| `claude-sessions [PATH]` | Stats for a directory and its subdirectories (default mode); `--all` covers every directory on this machine instead |
 | [`mv`](#mv) | Move a directory together with its sessions |
 | [`cp`](#cp) | Copy a directory together with its sessions |
 | [`rm`](#rm--clean) | Delete the sessions of a directory |
@@ -325,7 +326,8 @@ claude-sessions tui
 ```
 
 - Needs a terminal (stdin and stdout).
-- Lists every project (orphans in red); `Enter` opens its sessions, and a session opens for reading.
+- Lists every project (orphans in red). `Enter` opens a menu for the directory: browse its sessions, open a shell there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
+- `--cd-file FILE`: where "quit and cd here" writes the chosen directory (default: print it to stdout after leaving the TUI).
 - `--claude-dir` and `--color` are honored.
 - Build with `--no-default-features` to leave the TUI (and its `ratatui` dependency) out.
 
@@ -336,7 +338,8 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | First / last |
 | `Space` | Tick and move on (page down when reading) |
 | `a` | Tick all / none |
-| `Enter` / `→` | Open a project, or read a session |
+| `Enter` | Project: menu (`s` sessions, `h` shell here — `exit` returns to the list, `x` quit and cd here); session list: read it |
+| `→` | Open a project's sessions, or read a session |
 | `Esc` / `←` | Back (`Esc` in the top view clears the filter, then quits; `←` never quits) |
 | `/` | Filter (`Enter` confirms, `Esc` clears) |
 | `o` | Orphans only |
@@ -348,6 +351,13 @@ claude-sessions tui
 | `?` | Show all keys |
 | `q` / `Ctrl-C` | Quit |
 
+- A program cannot change its parent shell's directory, so `x` hands the path back instead. Add this wrapper to `~/.zshrc` / `~/.bashrc` to really `cd`:
+
+  ```sh
+  cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
+  ```
+
+- The shell opened with `h` has `CLAUDE_SESSIONS_TUI=1` set, so a prompt can show that you are inside the TUI.
 - Delete refuses while Claude Code runs in an affected directory; with `--purge-config` on, while any Claude Code runs.
 
 ## Relation to `claude purge`

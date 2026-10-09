@@ -83,6 +83,10 @@ pub enum Effect {
     Move { src: PathBuf, dst: String },
     Copy { src: PathBuf, dst: String },
     Export { dir: PathBuf, id: String, path: String },
+    /// Open a sub-shell in this directory; leaving it returns to the TUI.
+    Shell(PathBuf),
+    /// Quit and hand this directory to the caller.
+    Cd(PathBuf),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +104,8 @@ pub enum Mode {
     Confirm { question: String, effect: Effect },
     Input { label: String, text: String, kind: InputKind },
     Help,
+    /// What to do with the directory of project `row` (index into `App::rows`).
+    Menu { row: usize },
 }
 
 pub struct App {
@@ -357,7 +363,45 @@ impl App {
                 self.mode = Mode::Normal;
                 None
             }
+            Mode::Menu { row } => self.key_menu(row, key),
         }
+    }
+
+    fn key_menu(&mut self, row: usize, key: KeyEvent) -> Option<Effect> {
+        let Some(p) = self.rows.get(row) else {
+            self.mode = Mode::Normal;
+            return None;
+        };
+        let cwd = p.cwd.clone();
+        let orphan = p.orphan;
+        match key.code {
+            KeyCode::Char('s') | KeyCode::Enter | KeyCode::Right => {
+                self.mode = Mode::Normal;
+                self.open_project(row);
+            }
+            KeyCode::Char('h') | KeyCode::Char('x') if orphan => {
+                self.mode = Mode::Normal;
+                self.status = format!("{} no longer exists", cwd.display());
+            }
+            KeyCode::Char('h') => {
+                self.mode = Mode::Normal;
+                return Some(Effect::Shell(cwd));
+            }
+            KeyCode::Char('x') => {
+                self.mode = Mode::Normal;
+                return Some(Effect::Cd(cwd));
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('q') => self.mode = Mode::Normal,
+            _ => {}
+        }
+        None
+    }
+
+    fn open_project(&mut self, row: usize) {
+        self.proj = row;
+        self.view = View::Sessions;
+        self.selected.clear();
+        self.cursor = 0;
     }
 
     /// Enter / →: drill one level down.
@@ -365,10 +409,7 @@ impl App {
         match self.view {
             View::Projects => {
                 if let Some(i) = self.visible_projects().get(self.cursor).copied() {
-                    self.proj = i;
-                    self.view = View::Sessions;
-                    self.selected.clear();
-                    self.cursor = 0;
+                    self.open_project(i);
                 }
             }
             View::Sessions => {
@@ -489,6 +530,11 @@ impl App {
                     Sort::LastUsed => Sort::Path,
                 };
             }
+            KeyCode::Enter if self.view == View::Projects => {
+                if let Some(i) = self.visible_projects().get(self.cursor).copied() {
+                    self.mode = Mode::Menu { row: i };
+                }
+            }
             KeyCode::Enter | KeyCode::Right => self.open(),
             KeyCode::Char('d') => self.ask_delete(),
             KeyCode::Char('m') => self.ask_path(true),
@@ -540,6 +586,35 @@ mod tests {
 
     fn cwds(a: &App) -> Vec<String> {
         a.visible_projects().iter().map(|i| a.rows[*i].cwd.display().to_string()).collect()
+    }
+
+    #[test]
+    fn enter_in_projects_opens_menu_with_shell_cd_and_sessions() {
+        let mut a = app(); // sorted by path: alpha (orphan), beta, gamma
+        code(&mut a, KeyCode::Down); // beta
+        assert_eq!(code(&mut a, KeyCode::Enter), None);
+        assert!(matches!(a.mode, Mode::Menu { .. }));
+        assert_eq!(press(&mut a, "h"), vec![Effect::Shell(PathBuf::from("/b/beta"))]);
+        assert_eq!(a.mode, Mode::Normal);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(press(&mut a, "x"), vec![Effect::Cd(PathBuf::from("/b/beta"))]);
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "q"); // closes the menu, does not quit
+        assert_eq!((a.mode.clone(), a.view), (Mode::Normal, View::Projects));
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "s");
+        assert_eq!(a.view, View::Sessions);
+        assert_eq!(a.rows[a.proj].cwd, PathBuf::from("/b/beta"));
+    }
+
+    #[test]
+    fn menu_refuses_shell_and_cd_for_missing_directory() {
+        let mut a = app();
+        code(&mut a, KeyCode::Enter); // alpha is the orphan
+        assert!(press(&mut a, "h").is_empty());
+        assert!(a.status.contains("no longer exists"));
+        code(&mut a, KeyCode::Enter);
+        assert!(press(&mut a, "x").is_empty());
     }
 
     #[test]
@@ -631,7 +706,7 @@ mod tests {
     fn drill_into_sessions_delete_and_export() {
         let mut a = app();
         press(&mut a, "j");
-        code(&mut a, KeyCode::Enter);
+        code(&mut a, KeyCode::Right);
         assert_eq!(a.view, View::Sessions);
         assert_eq!(a.visible_sessions().len(), 2);
         press(&mut a, " ");

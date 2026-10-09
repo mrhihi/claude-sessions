@@ -6,7 +6,8 @@ mod app;
 mod ui;
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
@@ -40,10 +41,25 @@ fn delete(claude_dir: &Path, purge_config: bool, items: Vec<rm::Item>) -> String
     }
 }
 
-/// Runs a printing command (mv / cp) with the normal terminal, then comes back.
-fn outside(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<()>) -> Result<String> {
+/// Runs `$SHELL` (`%COMSPEC%` on Windows) in `dir` and waits for it to exit.
+fn spawn_shell(dir: &Path) -> Result<()> {
+    let shell = std::env::var_os(if cfg!(windows) { "COMSPEC" } else { "SHELL" })
+        .unwrap_or_else(|| if cfg!(windows) { "cmd".into() } else { "/bin/sh".into() });
+    Command::new(&shell)
+        .current_dir(dir)
+        .env("CLAUDE_SESSIONS_TUI", "1")
+        .status()
+        .with_context(|| format!("cannot start {}", Path::new(&shell).display()))?;
+    Ok(())
+}
+
+/// Runs a command with the normal terminal, then comes back. `pause`: wait for Enter first
+/// (for commands whose output should be read).
+fn outside(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<()>, pause: bool) -> Result<String> {
     ratatui::restore();
-    println!();
+    if pause {
+        println!();
+    }
     let res = f();
     let msg = match &res {
         Ok(()) => "Done".to_string(),
@@ -52,17 +68,27 @@ fn outside(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<()>) -> Re
             format!("Failed: {e:#}")
         }
     };
-    print!("\nPress Enter to return to the list ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    if pause || res.is_err() {
+        print!("\nPress Enter to return to the list ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+    }
     *terminal = ratatui::init();
     Ok(msg)
 }
 
-fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, effect: Effect) -> Result<bool> {
+fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, effect: Effect, chosen: &mut Option<PathBuf>) -> Result<bool> {
     let status = match effect {
         Effect::Quit => return Ok(true),
+        Effect::Cd(dir) => {
+            *chosen = Some(dir);
+            return Ok(true);
+        }
+        Effect::Shell(dir) => {
+            let msg = outside(terminal, || spawn_shell(&dir), false)?;
+            if msg == "Done" { format!("Back from the shell in {}", dir.display()) } else { msg }
+        }
         Effect::Reload => "Reloaded".to_string(),
         Effect::DeleteProjects(dirs) => {
             let items = dirs.iter().filter_map(|d| find(app, d)).map(|r| rm::project_item(claude_dir, &r.dir, &r.cwd)).collect();
@@ -76,8 +102,8 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, eff
             }
             None => "Project not found".into(),
         },
-        Effect::Move { src, dst } => outside(terminal, || mv::run(&mv::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_move_files: false, force: false }))?,
-        Effect::Copy { src, dst } => outside(terminal, || cp::run(&cp::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_copy_files: false }))?,
+        Effect::Move { src, dst } => outside(terminal, || mv::run(&mv::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_move_files: false, force: false }), true)?,
+        Effect::Copy { src, dst } => outside(terminal, || cp::run(&cp::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_copy_files: false }), true)?,
         Effect::Export { dir, id, path } => match find(app, &dir) {
             Some(r) => {
                 let file = dir.join(format!("{id}.jsonl"));
@@ -95,12 +121,15 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, eff
     Ok(false)
 }
 
-pub fn run(claude_dir: &Path) -> Result<()> {
+/// Runs the TUI. If the user chose "quit and cd here", the directory is written to `cd_file`
+/// (for a shell wrapper) or printed to stdout.
+pub fn run(claude_dir: &Path, cd_file: Option<&Path>) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("the TUI needs an interactive terminal");
     }
     let mut app = App::new(app::load(claude_dir).context("cannot load sessions")?);
     let mut terminal = ratatui::init();
+    let mut chosen = None;
     let result = (|| -> Result<()> {
         loop {
             terminal.draw(|f| ui::draw(f, &app))?;
@@ -109,12 +138,19 @@ pub fn run(claude_dir: &Path) -> Result<()> {
                 continue;
             }
             if let Some(effect) = app.handle_key(key) {
-                if perform(&mut terminal, claude_dir, &mut app, effect)? {
+                if perform(&mut terminal, claude_dir, &mut app, effect, &mut chosen)? {
                     return Ok(());
                 }
             }
         }
     })();
     ratatui::restore();
-    result
+    result?;
+    if let Some(dir) = chosen {
+        match cd_file {
+            Some(f) => std::fs::write(f, dir.display().to_string()).with_context(|| format!("cannot write {}", f.display()))?,
+            None => println!("{}", dir.display()),
+        }
+    }
+    Ok(())
 }

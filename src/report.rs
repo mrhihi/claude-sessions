@@ -26,14 +26,43 @@ pub struct Report {
 /// Collects stats for `base` and every project folder below it, skipping any whose
 /// path (relative to `base`) passes through an excluded directory name.
 pub fn build(claude_dir: &Path, base: &Path, excludes: &[String]) -> Result<Report> {
+    collect(claude_dir, base.display().to_string(), |cwd| {
+        let rel = strip_prefix_ci(cwd, base)?;
+        if is_excluded(&rel, excludes) {
+            return None;
+        }
+        Some(if rel.as_os_str().is_empty() { ".".to_string() } else { rel.display().to_string() })
+    })
+}
+
+/// Like `build`, but for every directory Claude Code has ever run in on this machine.
+/// Paths are shown absolute with the home directory written as `~`; `excludes` skips
+/// any project whose path passes through one of those names.
+pub fn build_all(claude_dir: &Path, excludes: &[String]) -> Result<Report> {
+    let home = dirs::home_dir();
+    collect(claude_dir, "all directories".to_string(), |cwd| {
+        if is_excluded(cwd, excludes) {
+            return None;
+        }
+        Some(tilde(cwd, home.as_deref()))
+    })
+}
+
+/// `path` with a leading `home` replaced by `~`.
+pub fn tilde(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rel) if rel.as_os_str().is_empty() => "~".to_string(),
+        Some(rel) => format!("~/{}", rel.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// `label` maps a project's directory to its display path, or `None` to skip it.
+fn collect(claude_dir: &Path, base: String, label: impl Fn(&Path) -> Option<String>) -> Result<Report> {
     let mut projects = Vec::new();
     let mut total = Agg::default();
     for p in list_projects(claude_dir)? {
-        let Some(rel) = strip_prefix_ci(&p.cwd, base) else { continue };
-        let rel = rel.as_path();
-        if is_excluded(rel, excludes) {
-            continue;
-        }
+        let Some(path) = label(&p.cwd) else { continue };
         let mut agg = Agg::default();
         let mut list = Vec::new();
         for f in session_files(&p.dir) {
@@ -45,11 +74,10 @@ pub fn build(claude_dir: &Path, base: &Path, excludes: &[String]) -> Result<Repo
         if list.is_empty() {
             continue;
         }
-        let path = if rel.as_os_str().is_empty() { ".".to_string() } else { rel.display().to_string() };
         projects.push(ProjectReport { path, total: agg, session_list: list });
     }
     projects.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Report { base: base.display().to_string(), projects, total })
+    Ok(Report { base, projects, total })
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -269,6 +297,33 @@ mod tests {
         apply(&mut r2, &View { sort: SortKey::LastUsed, ..Default::default() });
         assert_eq!(r2.projects[0].session_list[0].id, "a2");
         assert_eq!((r2.total.sessions, r2.total.messages), (2, 6));
+    }
+
+    #[test]
+    fn tilde_abbreviates_only_paths_under_home() {
+        let home = Path::new("/home/u");
+        assert_eq!(tilde(Path::new("/home/u"), Some(home)), "~");
+        assert_eq!(tilde(Path::new("/home/u/p/x"), Some(home)), "~/p/x");
+        assert_eq!(tilde(Path::new("/home/user2/p"), Some(home)), "/home/user2/p");
+        assert_eq!(tilde(Path::new("/opt/p"), None), "/opt/p");
+    }
+
+    #[test]
+    fn build_all_lists_unrelated_directories_and_honors_excludes() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = t.path().join(".claude");
+        for (name, cwd) in [("-a-one", "/a/one"), ("-b-two", "/b/node_modules/two")] {
+            let d = claude.join("projects").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let line = format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n");
+            std::fs::write(d.join("s1.jsonl"), line).unwrap();
+        }
+        let r = build_all(&claude, &[]).unwrap();
+        assert_eq!(r.projects.len(), 2);
+        assert_eq!(r.total.sessions, 2);
+        let r = build_all(&claude, &["node_modules".to_string()]).unwrap();
+        assert_eq!(r.projects.len(), 1);
+        assert_eq!(r.projects[0].path, "/a/one");
     }
 
     #[test]

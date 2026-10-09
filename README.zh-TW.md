@@ -62,6 +62,7 @@ claude-sessions --version
 claude-sessions                  # 統計目前目錄（含子目錄）
 claude-sessions ~/projects       # 統計指定目錄
 claude-sessions -s               # 同時列出每個 session
+claude-sessions --all            # 這台電腦上 Claude Code 執行過的所有目錄
 claude-sessions --since 7d       # 只看最近 7 天有活動的 session
 claude-sessions mv <來源> <目標>   # 搬移目錄並帶著 session
 claude-sessions tui              # 互動式瀏覽與管理 session
@@ -71,7 +72,7 @@ claude-sessions tui              # 互動式瀏覽與管理 session
 
 | 指令 | 用途 |
 |---|---|
-| `claude-sessions [PATH]` | 統計某目錄（含子目錄）的 session（預設模式） |
+| `claude-sessions [PATH]` | 統計某目錄（含子目錄）的 session（預設模式）；`--all` 改為統計這台電腦上所有目錄 |
 | [`mv`](#mv) | 搬移目錄並帶著 session |
 | [`cp`](#cp) | 複製目錄與其 session |
 | [`rm`](#rm--clean) | 刪除某目錄的 session |
@@ -210,6 +211,13 @@ claude-sessions clean [選項]       # 目錄已不存在的專案
 安全規則：
 
 - 沒加 `-y` 時會先詢問確認。
+- 程式無法改變父 shell 的目錄，所以 `x` 是把路徑交回來。把下面函式加進 `~/.zshrc` / `~/.bashrc` 就能真的 `cd`：
+
+  ```sh
+  cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
+  ```
+
+- 用 `h` 開出的 shell 會帶有 `CLAUDE_SESSIONS_TUI=1`，可用來在提示字元標示目前在 TUI 之下。
 - 若 Claude Code 正在受影響的目錄執行會拒絕（`--force` 可強制）。
 - 資料夾含自動記憶時，計畫會顯示 `(+N memory file(s))`。
 
@@ -325,7 +333,8 @@ claude-sessions tui
 ```
 
 - 需要終端機（stdin 與 stdout）。
-- 列出所有專案（孤兒以紅色標示），按 `Enter` 看該專案的 session，再開啟 session 閱讀。
+- 列出所有專案（孤兒以紅色標示），按 `Enter` 開啟該目錄的選單：查看 sessions、在該目錄開 shell、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
+- `--cd-file FILE`：「離開並 cd」把選到的目錄寫到這個檔案（預設在離開 TUI 後印到 stdout）。
 - 支援 `--claude-dir` 與 `--color`。
 - 以 `--no-default-features` 建置可不含 TUI（及其 `ratatui` 依賴）。
 
@@ -336,7 +345,8 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | 第一列 / 最後一列 |
 | `Space` | 勾選並往下移（閱讀時為下一頁） |
 | `a` | 全選 / 全不選 |
-| `Enter` / `→` | 開啟專案，或閱讀 session |
+| `Enter` | 專案：選單（`s` 看 sessions、`h` 在該目錄開 shell — `exit` 回到列表、`x` 離開並 cd）；session 列表：閱讀 |
+| `→` | 開啟專案的 sessions，或閱讀 session |
 | `Esc` / `←` | 返回（最上層的 `Esc` 先清除過濾，再按則離開；`←` 不會離開） |
 | `/` | 過濾（`Enter` 確認，`Esc` 清除） |
 | `o` | 只看孤兒 |

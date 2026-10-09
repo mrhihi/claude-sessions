@@ -22,7 +22,11 @@ enum ExportFormat {
 #[command(version, about = "Inspect Claude Code sessions per directory, and move directories together with their sessions")]
 struct Cli {
     /// Directory to inspect (default: current directory); sessions of its subdirectories are included
+    #[arg(conflicts_with = "all")]
     path: Option<PathBuf>,
+    /// Cover every directory Claude Code has run in on this machine instead of one directory
+    #[arg(long, short = 'a')]
+    all: bool,
     /// Extra directory names to skip (added to the defaults)
     #[arg(long, short = 'x', value_name = "NAME")]
     exclude: Vec<String>,
@@ -106,7 +110,11 @@ enum Cmd {
     },
     /// Browse projects and sessions interactively: tick, delete, move, copy, export
     #[cfg(feature = "tui")]
-    Tui,
+    Tui {
+        /// Write the directory chosen with "quit and cd here" to this file (for a shell wrapper); default: print it
+        #[arg(long, value_name = "FILE")]
+        cd_file: Option<PathBuf>,
+    },
     /// Find session folders and history entries that point at directories which no longer exist
     Doctor {
         /// Machine-readable output
@@ -229,7 +237,7 @@ fn run(cli: Cli) -> Result<()> {
             search::run(&search::Opts { claude_dir, keyword, path, ignore_case, limit })
         }
         #[cfg(feature = "tui")]
-        Some(Cmd::Tui) => claude_sessions::tui::run(&claude_dir),
+        Some(Cmd::Tui { cd_file }) => claude_sessions::tui::run(&claude_dir, cd_file.as_deref()),
         Some(Cmd::Doctor { fix: true, dry_run, yes, force, delete, .. }) => doctor::fix(&claude_dir, dry_run, yes, force, delete),
         Some(Cmd::Doctor { json, .. }) => {
             let d = doctor::diagnose(&claude_dir)?;
@@ -266,14 +274,18 @@ fn run(cli: Cli) -> Result<()> {
                 sort: cli.sort,
                 limit: cli.limit,
             };
-            let base = scan::resolve(&cli.path.unwrap_or_else(|| PathBuf::from(".")))?;
-            let mut excludes: Vec<String> = if cli.no_default_excludes {
+            let mut excludes: Vec<String> = if cli.no_default_excludes || cli.all {
                 vec![]
             } else {
                 scan::DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect()
             };
             excludes.extend(cli.exclude);
-            let mut r = report::build(&claude_dir, &base, &excludes)?;
+            let mut r = if cli.all {
+                report::build_all(&claude_dir, &excludes)?
+            } else {
+                let base = scan::resolve(&cli.path.unwrap_or_else(|| PathBuf::from(".")))?;
+                report::build(&claude_dir, &base, &excludes)?
+            };
             report::apply(&mut r, &view);
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&r)?);

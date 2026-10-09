@@ -159,7 +159,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let hint = match (&app.mode, app.view) {
         (Mode::Filter, _) => " type to filter · Enter keep · Esc clear".to_string(),
-        (_, View::Projects) => " ↑↓ move · Space tick · a all · Enter/→ open · d delete · m move · c copy · / filter · o orphans · s sort · ? help · q quit".to_string(),
+        (_, View::Projects) => " ↑↓ move · Space tick · a all · Enter menu · → sessions · d delete · m move · c copy · / filter · o orphans · s sort · ? help · q quit".to_string(),
         (_, View::Sessions) => " ↑↓ move · Space tick · a all · d delete · e export · / filter · Enter/→ read · Esc/← back · ? help · q quit".to_string(),
         (_, View::Session) => " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · Esc/← back · ? help · q quit".to_string(),
     };
@@ -186,13 +186,28 @@ pub fn draw(f: &mut Frame, app: &App) {
             let lines = vec![Line::from(format!("{text}▏")), Line::from(""), Line::from("Enter confirm · Esc cancel").style(Style::new().fg(Color::DarkGray))];
             f.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!(" {label} "))), area);
         }
+        Mode::Menu { row } => {
+            let Some(p) = app.rows.get(*row) else { return };
+            let area = centered(f.area(), 64, 8);
+            f.render_widget(Clear, area);
+            let off = if p.orphan { Style::new().fg(Color::DarkGray) } else { Style::new() };
+            let text = vec![
+                Line::from("[s] Browse sessions"),
+                Line::from("[h] Shell here (exit returns to this list)").style(off),
+                Line::from("[x] Quit and cd here (see README: shell wrapper)").style(off),
+                Line::from(if p.orphan { "    directory no longer exists" } else { "" }).style(Style::new().fg(Color::Red)),
+                Line::from("Esc cancel").style(Style::new().fg(Color::DarkGray)),
+            ];
+            f.render_widget(Paragraph::new(text).block(Block::bordered().title(format!(" {} ", p.cwd.display()))), area);
+        }
         Mode::Help => {
-            let area = centered(f.area(), 64, 20);
+            let area = centered(f.area(), 70, 21);
             f.render_widget(Clear, area);
             let text = "\
 ↑↓ / j k    move          g G / Home End   first / last
 Space       tick + next   a                tick all / none
-Enter / →   open project / read session    Esc / ←  back (Esc: clear / quit)
+Enter       project: menu (sessions / shell / cd) · session: read
+→           open sessions    Esc / ←  back (Esc: clear / quit)
 Reading:    ↑↓ j k scroll · PgUp PgDn b Space page · g G top / bottom
 /           filter        o                orphans only
 s           cycle sort (path, size, last used)
@@ -264,6 +279,15 @@ mod tests {
     }
 
     #[test]
+    fn enter_shows_directory_menu() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        a.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let out = render(&a);
+        assert!(out.contains("[s] Browse sessions") && out.contains("[h] Shell here") && out.contains("[x] Quit and cd") && out.contains("no longer exists"), "{out}");
+    }
+
+    #[test]
     fn reading_a_session_shows_turns_with_cjk() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut a = app();
@@ -281,7 +305,7 @@ mod tests {
     #[test]
     fn session_view_lists_title() {
         let mut a = app();
-        a.handle_key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Enter, ratatui::crossterm::event::KeyModifiers::NONE));
+        a.handle_key(ratatui::crossterm::event::KeyEvent::new(ratatui::crossterm::event::KeyCode::Right, ratatui::crossterm::event::KeyModifiers::NONE));
         let out = render(&a);
         assert!(out.contains("Fix the bug") && out.contains("abcdef12"), "{out}");
     }
