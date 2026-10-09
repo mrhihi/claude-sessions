@@ -23,6 +23,12 @@ pub(crate) struct Step {
     pub(crate) new_dir: PathBuf,
 }
 
+/// True when `after` (the JSON text following a path prefix) continues into a sub-path:
+/// `/`, or on Windows an escaped `\\` separator.
+fn at_separator(after: &str) -> bool {
+    after.starts_with('/') || (cfg!(windows) && after.starts_with("\\\\"))
+}
+
 fn json_escape(s: &str) -> String {
     let q = serde_json::to_string(s).unwrap();
     q[1..q.len() - 1].to_string()
@@ -38,7 +44,7 @@ pub fn rewrite_prefix(text: &str, key: &str, old: &str, new: &str) -> (String, u
     while let Some(i) = rest.find(&needle) {
         out.push_str(&rest[..i]);
         let after = &rest[i + needle.len()..];
-        if after.starts_with('"') || after.starts_with('/') {
+        if after.starts_with('"') || at_separator(after) {
             out.push_str(&rep);
             n += 1;
         } else {
@@ -109,7 +115,7 @@ pub fn rewrite_path_keys(text: &str, old: &str, new: &str) -> Result<(String, Ve
             })
             .find_map(|(j, hit)| hit.then_some(j));
         match end {
-            Some(j) if (j == 0 || after.starts_with('/')) && is_key(&after[j + 1..]) => {
+            Some(j) if (j == 0 || at_separator(after)) && is_key(&after[j + 1..]) => {
                 let tail = &after[..j];
                 if text.contains(&format!("{rep}{tail}\"")) && !(old == new) {
                     let full = format!("{rep}{tail}\"");
@@ -429,7 +435,7 @@ pub fn run(o: &Opts) -> Result<()> {
 /// `mv`/`cp` semantics for the destination: an existing directory means "put it inside",
 /// anything else is the final path. A backslash is almost certainly a shell-eaten separator.
 pub fn resolve_dst(src: &Path, dst: PathBuf, sessions_only: bool) -> Result<PathBuf> {
-    if dst.to_string_lossy().contains('\\') {
+    if cfg!(unix) && dst.to_string_lossy().contains('\\') {
         bail!("destination {} contains a backslash; use '/' (or quote the path), an unquoted '\\' is dropped by the shell", dst.display());
     }
     if sessions_only || !dst.is_dir() {
