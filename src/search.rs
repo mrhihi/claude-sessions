@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use crate::export::load_turns;
-use crate::scan::{list_projects, resolve, session_files};
+use crate::memory::{self, MemoryFile};
+use crate::scan::{Project, list_all_projects, list_projects, resolve, session_files};
 use crate::stats::analyze_session;
 use crate::style;
 
@@ -15,6 +16,28 @@ pub struct Opts {
     pub ignore_case: bool,
     /// Stop after this many matching messages.
     pub limit: usize,
+    /// Also search the auto-memory files (one hit per file).
+    pub memory: bool,
+}
+
+/// A memory file that matched, with the snippet of its first matching line.
+pub type MemoryHit = (Project, MemoryFile, (String, String, String));
+
+/// Memory files of the projects at or below `base` containing `kw`.
+pub fn memory_hits(claude_dir: &Path, base: Option<&Path>, kw: &str, ignore_case: bool) -> Result<Vec<MemoryHit>> {
+    let mut out = Vec::new();
+    for p in list_all_projects(claude_dir)? {
+        if base.is_some_and(|b| !p.cwd.starts_with(b)) {
+            continue;
+        }
+        for f in memory::list(&p.dir) {
+            let text = std::fs::read_to_string(&f.path).unwrap_or_default();
+            if let Some(snip) = snippet(&text, kw, ignore_case) {
+                out.push((p.clone(), f, snip));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Char index of the first occurrence of `kw` in `line`.
@@ -41,8 +64,27 @@ pub fn run(o: &Opts) -> Result<()> {
         bail!("nothing to search for");
     }
     let base = o.path.as_deref().map(resolve).transpose()?;
-    let (mut hits, mut sessions_hit) = (0, 0);
+    let (mut hits, mut sessions_hit, mut memory_hit) = (0, 0, 0);
+    if o.memory {
+        let found = memory_hits(&o.claude_dir, base.as_deref(), &o.keyword, o.ignore_case)?;
+        if !found.is_empty() {
+            println!("{}", style::bold_cyan("Memory"));
+        }
+        for (p, f, (before, mid, after)) in found.into_iter().take(o.limit) {
+            println!("{}  {}", style::yellow(&f.file), style::cyan(&p.cwd.display().to_string()));
+            println!("  {}{}{}", before.replace('\t', " "), style::bold_yellow(&mid), after.replace('\t', " "));
+            hits += 1;
+            memory_hit += 1;
+        }
+        if memory_hit > 0 && hits < o.limit {
+            println!();
+        }
+    }
     'outer: for p in list_projects(&o.claude_dir)? {
+        if hits >= o.limit {
+            println!("{}", style::dim(&format!("(stopped at {} matches; raise --limit to see more)", o.limit)));
+            break;
+        }
         if base.as_ref().is_some_and(|b| !p.cwd.starts_with(b)) {
             continue;
         }
@@ -87,7 +129,8 @@ pub fn run(o: &Opts) -> Result<()> {
     if hits == 0 {
         println!("{}", style::dim("(no matches)"));
     } else if hits < o.limit {
-        println!("{}", style::dim(&format!("{hits} match(es) in {sessions_hit} session(s)")));
+        let mem = if memory_hit > 0 { format!(" and {memory_hit} memory file(s)") } else { String::new() };
+        println!("{}", style::dim(&format!("{hits} match(es) in {sessions_hit} session(s){mem}")));
     }
     Ok(())
 }
@@ -95,6 +138,25 @@ pub fn run(o: &Opts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_hits_respect_path_and_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join(".claude");
+        for name in ["a", "b"] {
+            let cwd = root.join(name);
+            std::fs::create_dir_all(&cwd).unwrap();
+            let mem = claude.join("projects").join(crate::encode::encode_path(&cwd)).join("memory");
+            std::fs::create_dir_all(&mem).unwrap();
+            std::fs::write(mem.join("note.md"), format!("---\nname: n\n---\nUse the Needle in {name}\n")).unwrap();
+        }
+        assert_eq!(memory_hits(&claude, None, "needle", true).unwrap().len(), 2);
+        assert!(memory_hits(&claude, None, "needle", false).unwrap().is_empty());
+        let only_a = memory_hits(&claude, Some(&root.join("a")), "Needle", false).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].2.1, "Needle");
+    }
 
     #[test]
     fn snippet_finds_match_and_trims_context() {

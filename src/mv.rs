@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::encode::encode_path;
-use crate::scan::{Project, list_projects, projects_root, resolve};
+use crate::scan::{Project, list_all_projects, projects_root, resolve};
 use crate::style;
 
 pub struct Opts {
@@ -297,7 +297,7 @@ pub(crate) fn plan_steps(claude_dir: &Path, src: &Path, dst: &Path) -> Result<Ve
     let root = projects_root(claude_dir);
     let mut steps = Vec::new();
     let mut taken = HashSet::new();
-    for p in list_projects(claude_dir)? {
+    for p in list_all_projects(claude_dir)? {
         let Ok(rel) = p.cwd.strip_prefix(src) else { continue };
         let new_cwd = if rel.as_os_str().is_empty() { dst.to_path_buf() } else { dst.join(rel) };
         let new_dir = root.join(encode_path(&new_cwd));
@@ -352,7 +352,7 @@ pub fn run(o: &Opts) -> Result<()> {
         let n = session_count(&s.project.dir);
         println!(
             "  {}  {} {} {}",
-            style::yellow(&format!("{n} session(s)")),
+            style::yellow(&format!("{n} session(s){}", memory_note(&s.project.dir))),
             style::cyan(&folder(&s.project.dir)),
             style::dim("→"),
             style::green(&folder(&s.new_dir))
@@ -495,7 +495,7 @@ fn update_sessions(o: &Opts, steps: &[Step], old: &str, new: &str, cj: ClaudeJso
 /// Re-reads the result the way Claude's `/resume` does: the folder must be named after
 /// the new directory and the sessions' recorded directory must be that directory.
 fn verify(claude_dir: &Path, steps: &[Step], src: &Path, dst: &Path) -> Result<()> {
-    let after = list_projects(claude_dir)?;
+    let after = list_all_projects(claude_dir)?;
     let mut bad = Vec::new();
     for s in steps {
         let rel = s.project.cwd.strip_prefix(src).unwrap_or(Path::new(""));
@@ -513,6 +513,14 @@ fn verify(claude_dir: &Path, steps: &[Step], src: &Path, dst: &Path) -> Result<(
 
 fn folder(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// ` + N memory file(s)` when the project folder holds auto-memory.
+pub(crate) fn memory_note(dir: &Path) -> String {
+    match crate::memory::count(dir) {
+        0 => String::new(),
+        n => format!(" + {n} memory file(s)"),
+    }
 }
 
 fn session_count(dir: &Path) -> usize {

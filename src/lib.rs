@@ -2,6 +2,7 @@ pub mod cp;
 pub mod doctor;
 pub mod encode;
 pub mod export;
+pub mod memory;
 pub mod mv;
 pub mod report;
 pub mod rm;

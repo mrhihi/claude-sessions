@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::scan::{is_excluded, list_projects, session_files, strip_prefix_ci};
+use crate::scan::{is_excluded, list_all_projects, session_files, strip_prefix_ci};
 use crate::stats::{Agg, SessionStat, analyze_session};
 use crate::style;
 
@@ -13,6 +13,8 @@ pub struct ProjectReport {
     pub path: String,
     #[serde(flatten)]
     pub total: Agg,
+    /// Files in the project's auto-memory folder.
+    pub memory_files: usize,
     pub session_list: Vec<SessionStat>,
 }
 
@@ -21,6 +23,7 @@ pub struct Report {
     pub base: String,
     pub projects: Vec<ProjectReport>,
     pub total: Agg,
+    pub memory_files: usize,
 }
 
 /// Collects stats for `base` and every project folder below it, skipping any whose
@@ -61,8 +64,9 @@ pub fn tilde(path: &Path, home: Option<&Path>) -> String {
 fn collect(claude_dir: &Path, base: String, label: impl Fn(&Path) -> Option<String>) -> Result<Report> {
     let mut projects = Vec::new();
     let mut total = Agg::default();
-    for p in list_projects(claude_dir)? {
+    for p in list_all_projects(claude_dir)? {
         let Some(path) = label(&p.cwd) else { continue };
+        let memory_files = crate::memory::count(&p.dir);
         let mut agg = Agg::default();
         let mut list = Vec::new();
         for f in session_files(&p.dir) {
@@ -71,13 +75,14 @@ fn collect(claude_dir: &Path, base: String, label: impl Fn(&Path) -> Option<Stri
             total.add(&s);
             list.push(s);
         }
-        if list.is_empty() {
+        if list.is_empty() && memory_files == 0 {
             continue;
         }
-        projects.push(ProjectReport { path, total: agg, session_list: list });
+        projects.push(ProjectReport { path, total: agg, memory_files, session_list: list });
     }
     projects.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Report { base, projects, total })
+    let memory_files = projects.iter().map(|p| p.memory_files).sum();
+    Ok(Report { base, projects, total, memory_files })
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -143,6 +148,7 @@ pub fn apply(r: &mut Report, v: &View) {
     if let Some(n) = v.limit {
         r.projects.truncate(n);
     }
+    r.memory_files = r.projects.iter().map(|p| p.memory_files).sum();
     let mut total = Agg::default();
     for p in &r.projects {
         for s in &p.session_list {
@@ -190,13 +196,15 @@ fn truncate(s: &str, w: usize) -> String {
 }
 
 /// Cells are padded before being colored so ANSI codes don't break alignment.
-fn row(name: String, a: &Agg, bold: bool) -> String {
+fn row(name: String, a: &Agg, memory: usize, bold: bool) -> String {
     let num = |s: String| if bold { style::bold_green(&s) } else { s };
     let soft = |s: String| if bold { style::bold_green(&s) } else { style::dim(&s) };
+    let mem = format!("{:>4}", if memory > 0 { memory.to_string() } else { "-".into() });
     format!(
-        "{} {} {} {} {} {} {}  {}",
+        "{} {} {} {} {} {} {} {}  {}",
         name,
         num(format!("{:>8}", a.sessions)),
+        if bold { style::bold_green(&mem) } else if memory > 0 { style::yellow(&mem) } else { style::dim(&mem) },
         num(format!("{:>8}", human(a.messages))),
         num(format!("{:>9}", human(a.usage.input))),
         num(format!("{:>9}", human(a.usage.output))),
@@ -218,13 +226,13 @@ pub fn print_text(r: &Report, detail: bool) {
     }
     let w = r.projects.iter().map(|p| p.path.width()).max().unwrap_or(3).max(5);
     let header = format!(
-        "{} {:>8} {:>8} {:>9} {:>9} {:>9} {:>9}  {}",
-        pad("DIR", w), "SESSIONS", "MSGS", "INPUT", "OUTPUT", "CACHE-R", "CACHE-W", "LAST (UTC)"
+        "{} {:>8} {:>4} {:>8} {:>9} {:>9} {:>9} {:>9}  {}",
+        pad("DIR", w), "SESSIONS", "MEM", "MSGS", "INPUT", "OUTPUT", "CACHE-R", "CACHE-W", "LAST (UTC)"
     );
     let rule = style::dim(&"─".repeat(header.width()));
     println!("\n{}\n{rule}", style::bold(&header));
     for p in &r.projects {
-        println!("{}", row(style::cyan(&pad(&p.path, w)), &p.total, false));
+        println!("{}", row(style::cyan(&pad(&p.path, w)), &p.total, p.memory_files, false));
         if detail {
             for s in &p.session_list {
                 let title = match s.title.as_deref() {
@@ -243,7 +251,7 @@ pub fn print_text(r: &Report, detail: bool) {
         }
     }
     println!("{rule}");
-    println!("{}", row(style::bold_green(&pad("TOTAL", w)), &r.total, true));
+    println!("{}", row(style::bold_green(&pad("TOTAL", w)), &r.total, r.memory_files, true));
     println!();
     kv("Range", format!("{} → {} {}", ts(&r.total.first), ts(&r.total.last), style::dim("(UTC)")));
     kv("Size", format!("{:.1} MB on disk", r.total.bytes as f64 / 1_048_576.0));
@@ -268,7 +276,7 @@ mod tests {
     }
 
     fn proj(path: &str, list: Vec<SessionStat>) -> ProjectReport {
-        ProjectReport { path: path.into(), total: Agg::default(), session_list: list }
+        ProjectReport { path: path.into(), total: Agg::default(), memory_files: 0, session_list: list }
     }
 
     #[test]
@@ -281,6 +289,7 @@ mod tests {
                 proj("c", vec![sess("c1", "2025-01-01T00:00:00Z", 50, 1000)]),
             ],
             total: Agg::default(),
+            memory_files: 0,
         };
         let v = View { since: Some("2026-01-15T00:00:00Z".into()), sort: SortKey::Size, limit: Some(1) };
         apply(&mut r, &v);
@@ -293,6 +302,7 @@ mod tests {
             base: "/".into(),
             projects: vec![proj("a", vec![sess("a1", "2026-01-01T00:00:00Z", 5, 10), sess("a2", "2026-03-01T00:00:00Z", 1, 1)])],
             total: Agg::default(),
+            memory_files: 0,
         };
         apply(&mut r2, &View { sort: SortKey::LastUsed, ..Default::default() });
         assert_eq!(r2.projects[0].session_list[0].id, "a2");
@@ -324,6 +334,31 @@ mod tests {
         let r = build_all(&claude, &["node_modules".to_string()]).unwrap();
         assert_eq!(r.projects.len(), 1);
         assert_eq!(r.projects[0].path, "/a/one");
+    }
+
+    #[test]
+    fn memory_is_counted_and_memory_only_projects_are_listed() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let claude = root.join(".claude");
+        let (with_sessions, memory_only) = (root.join("p/a"), root.join("p/b"));
+        std::fs::create_dir_all(&memory_only).unwrap();
+        for (cwd, sessions) in [(&with_sessions, true), (&memory_only, false)] {
+            let d = claude.join("projects").join(crate::encode::encode_path(cwd));
+            std::fs::create_dir_all(d.join("memory")).unwrap();
+            std::fs::write(d.join("memory/MEMORY.md"), "- [x](x.md)\n").unwrap();
+            std::fs::write(d.join("memory/x.md"), "x\n").unwrap();
+            if sessions {
+                let c = serde_json::to_string(&cwd.display().to_string()).unwrap();
+                std::fs::write(d.join("s.jsonl"), format!("{{\"cwd\":{c},\"timestamp\":\"2026-01-01T00:00:00Z\"}}\n")).unwrap();
+            }
+        }
+        let r = build(&claude, &root.join("p"), &[]).unwrap();
+        let rows: Vec<(&str, usize, u64)> = r.projects.iter().map(|p| (p.path.as_str(), p.memory_files, p.total.sessions)).collect();
+        assert_eq!(rows, [("a", 2, 1), ("b", 2, 0)]);
+        assert_eq!(r.memory_files, 4);
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["projects"][1]["memory_files"], 2);
     }
 
     #[test]

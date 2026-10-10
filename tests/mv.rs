@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use claude_sessions::{encode::encode_path, mv, report};
+use claude_sessions::{cp, encode::encode_path, memory, mv, report};
 
 fn session(claude: &Path, cwd: &Path, id: &str) {
     let dir = claude.join("projects").join(encode_path(cwd));
@@ -220,4 +220,34 @@ fn resolve_dst_moves_into_existing_directory_like_mv() {
     if cfg!(unix) {
         assert!(mv::resolve_dst(&src, PathBuf::from("a\\b"), false).is_err());
     }
+}
+
+fn memory_only(claude: &Path, cwd: &Path) -> PathBuf {
+    let mem = claude.join("projects").join(encode_path(cwd)).join("memory");
+    fs::create_dir_all(&mem).unwrap();
+    fs::write(mem.join("MEMORY.md"), "- [Note](note.md) — a note\n").unwrap();
+    fs::write(mem.join("note.md"), "---\nname: note\n---\nremember this\n").unwrap();
+    mem
+}
+
+#[test]
+fn mv_and_cp_carry_a_memory_only_project_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let claude = root.join("claude");
+    let (src, moved, copied) = (root.join("repo"), root.join("repo2"), root.join("repo3"));
+    fs::create_dir_all(src.join(".git")).unwrap();
+    session(&claude, &src.join("sub"), "s1");
+    let old_mem = memory_only(&claude, &src);
+
+    mv::run(&mv::Opts { claude_dir: claude.clone(), src: src.clone(), dst: moved.clone(), dry_run: false, no_move_files: false, force: false }).unwrap();
+    assert!(!old_mem.exists());
+    let new_mem = claude.join("projects").join(encode_path(&moved)).join("memory");
+    assert!(new_mem.join("note.md").is_file());
+    assert_eq!(memory::resolve_project(&claude, &moved.join("sub")).unwrap().cwd, moved);
+    assert_eq!(report::build(&claude, &moved, &[]).unwrap().memory_files, 2);
+
+    cp::run(&cp::Opts { claude_dir: claude.clone(), src: moved.clone(), dst: copied.clone(), dry_run: false, no_copy_files: false }).unwrap();
+    assert!(new_mem.join("note.md").is_file());
+    assert!(claude.join("projects").join(encode_path(&copied)).join("memory/note.md").is_file());
 }

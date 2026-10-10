@@ -65,6 +65,7 @@ claude-sessions -s               # 同時列出每個 session
 claude-sessions --all            # 這台電腦上 Claude Code 執行過的所有目錄
 claude-sessions --since 7d       # 只看最近 7 天有活動的 session
 claude-sessions mv <來源> <目標>   # 搬移目錄並帶著 session
+claude-sessions memory           # 查看目前專案的 auto-memory
 claude-sessions tui              # 互動式瀏覽與管理 session
 ```
 
@@ -80,6 +81,7 @@ claude-sessions tui              # 互動式瀏覽與管理 session
 | [`doctor`](#doctor) | 找出（並可修復）目錄已不存在所留下的殘留 |
 | [`search`](#search) | 搜尋提問與回覆 |
 | [`export`](#export) | 把單一 session 輸出成 Markdown 或 JSON |
+| [`memory`](#memory) | 查看、編輯、刪除、複製、匯出專案的 auto-memory |
 | [`tui`](#tui) | 互動式介面 |
 
 ### 全域選項
@@ -127,6 +129,7 @@ claude-sessions [PATH] [選項]
 | `--no-default-excludes` | 取消預設排除（`-x` 指定的仍然有效） | 關 |
 
 - 除了 `path` 之外，所有 `--sort` 都是由大到小。
+- `MEM` 欄是該專案的 auto-memory 檔案數（JSON 為 `memory_files`）。只有 memory、沒有 session 的目錄也會列出（`--since` 會把它們濾掉）。
 - 預設排除：`.git node_modules target .venv venv __pycache__ .idea .vscode dist build .next .cache`
 
 ```sh
@@ -152,7 +155,7 @@ claude-sessions mv <來源> <目標> [選項]
 會變更的項目：
 
 - 搬移實體目錄。
-- 改名 `~/.claude/projects/` 下對應的資料夾。
+- 改名 `~/.claude/projects/` 下對應的資料夾，資料夾內的 auto-memory（`memory/`）跟著走；只有 memory、沒有 session 的資料夾也會搬。
 - 改寫 session jsonl 內的目錄欄位：`cwd`、`relocatedCwd`、`projectPath`、`live_cwd`、`workingDirectory`、`realParentDir`（工具輸入輸出與訊息內文屬於歷史，不會動）。
 - 改寫 `history.jsonl` 與 `~/.claude.json`（兩者會先備份，見[備份](#備份)）。
 
@@ -187,6 +190,7 @@ claude-sessions cp <來源> <目標> [選項]
 - 路徑錯誤的規則與 `mv` 相同，另外不可複製到自己身上。
 - 目錄以系統的 `cp -a` 複製。
 - 只有複本的 `cwd` 會改成新路徑，原本的仍指向 `來源`。
+- auto-memory 會一起複製（包含只有 memory 的資料夾）。
 - 不會動 `history.jsonl` 與 `.claude.json`，所以 Claude 會重新詢問是否信任新目錄。
 - 沒有 `--force`，也不檢查 Claude 是否正在執行。
 
@@ -206,20 +210,15 @@ claude-sessions clean [選項]       # 目錄已不存在的專案
 | `-y`, `--yes` | 略過 `[y/N]` 確認 |
 | `-i`, `--interactive` | 逐個資料夾詢問：`y` / `n` / `a`（全部）/ `q`（離開）。不可與 `-y` 併用。 |
 | `--purge-config` | 一併清理 `history.jsonl` 與 `.claude.json`（見下方） |
+| `--keep-memory` | 刪整個資料夾時保留 `memory/`（以及該專案的 `.claude.json` 項目與 history 行，好讓 memory 仍能對應到目錄） |
 | `--force` | 略過 Claude 執行中的檢查 |
 
 安全規則：
 
 - 沒加 `-y` 時會先詢問確認。
-- 程式無法改變父 shell 的目錄，所以 `x` 是把路徑交回來。把下面函式加進 `~/.zshrc` / `~/.bashrc` 就能真的 `cd`：
-
-  ```sh
-  cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
-  ```
-
-- 用 `h` 開出的 shell 會帶有 `CLAUDE_SESSIONS_TUI=1`，可用來在提示字元標示目前在 TUI 之下。
 - 若 Claude Code 正在受影響的目錄執行會拒絕（`--force` 可強制）。
-- 資料夾含自動記憶時，計畫會顯示 `(+N memory file(s))`。
+- 資料夾含自動記憶時，計畫會顯示 `(+N memory file(s))`；加 `--keep-memory` 則顯示 `(N memory file(s) kept)`。
+- 只有 memory、沒有 session 的資料夾不會被 `rm` / `clean` 刪除；要刪 memory 請用 [`memory rm`](#memory)。
 
 除了 transcript，還會刪除：
 
@@ -296,11 +295,13 @@ claude-sessions search <KEYWORD> [選項]
 | `-i`, `--ignore-case` | 不分大小寫 | 區分大小寫 |
 | `--path <DIR>` | 只搜尋此目錄及其子目錄的 session | 所有專案 |
 | `--limit <N>` | 比對到 N 則訊息後停止 | `20` |
+| `--no-memory` | 不搜尋 auto-memory 檔案 | 會搜尋 |
 
+- 先印出 `Memory` 區塊：每個符合的 memory 檔一筆（檔名、目錄、第一個符合的行），也計入 `--limit`。
 - 搜尋範圍與 `export` 相同，包含 `[tool: …]` 行。
 - 每個 session 會印出 8 碼 id、標題與目錄。
 - 每個命中會印出角色、`YYYY-MM-DD HH:MM` 與片段（該訊息第一個符合的行，符合處會標示）。
-- 結尾會顯示 `N match(es) in M session(s)`；若提早停止會提示調高 `--limit`；沒有結果則顯示 `(no matches)`。
+- 結尾會顯示 `N match(es) in M session(s)`（有 memory 命中時再加上 `and K memory file(s)`）；若提早停止會提示調高 `--limit`；沒有結果則顯示 `(no matches)`。
 
 ### export
 
@@ -326,6 +327,39 @@ claude-sessions export <ID> [選項]
 - Markdown 以標題開頭，接著是 Session、Directory、Time (UTC)、Models 幾行；每個回合是 `## User|Assistant · 時間戳`。
 - JSON 格式為 `{session, directory, turns[]}`，每個回合有 `role`、`timestamp`、`model`、`text`。
 
+### memory
+
+管理 Claude Code 的 auto-memory：`~/.claude/projects/<專案>/memory/` 下的 `MEMORY.md` 索引（每則記憶一行，每次對話開頭都會載入）與每則記憶的 Markdown 檔。
+
+```sh
+claude-sessions memory [PATH] [--all] [--json]          # 列出 memory
+claude-sessions memory show [NAME] [--path DIR]         # 印出內容（預設 MEMORY.md）
+claude-sessions memory edit [NAME] [--path DIR]         # 用編輯器開啟（預設 MEMORY.md）
+claude-sessions memory rm <NAME>... [--path DIR] [--dry-run] [-y] [--force]
+claude-sessions memory cp <SRC> <DST> [NAME...] [--dry-run] [--force]
+claude-sessions memory export [PATH] [--format md|json] [-o FILE]
+```
+
+| 指令 | 說明 |
+|---|---|
+| `memory` | 列出檔名、類型（frontmatter 的 `type`）與說明。`--all` 列出所有專案，`--json` 輸出 JSON。 |
+| `show` / `edit` | `NAME` 可以是檔名、去掉 `.md` 的檔名、frontmatter 的 `name`，或其唯一前綴。編輯器依序用 `$VISUAL`、`$EDITOR`、`vi`（Windows 為 `notepad`）。 |
+| `rm` | 刪除檔案，並移除 `MEMORY.md` 中連到它的索引行（`MEMORY.md` 先備份，見[備份](#備份)）。會先詢問；Claude Code 在該專案執行中時拒絕（`--force` 可強制）。 |
+| `cp` | 把 memory 從 `SRC` 的專案複製到 `DST` 的專案，並把索引行加進目標的 `MEMORY.md`。不給 `NAME` 就複製全部；目標已有同名檔案時拒絕（`--force` 覆寫）。 |
+| `export` | 把整個專案的 memory 輸出成一份 Markdown 或 JSON。 |
+
+- 哪個專案：Claude 以 **git repo 根目錄**決定 memory 資料夾，所以子目錄與 worktree 共用同一份。`PATH` / `--path`（預設目前目錄）會先找它的 git 根目錄，找不到就往上找最近一個有 memory 的目錄。
+- `memory cp` 的目標若尚無資料夾，會依目標的 git 根目錄（沒有就用 `DST` 本身）建立。
+- 若 `~/.claude/settings.json` 設了 `autoMemoryDirectory`，memory 會在別處；本工具只管 `projects/*/memory`，會印出提示。
+
+```sh
+claude-sessions memory --all
+claude-sessions memory show feedback-history
+claude-sessions memory rm old-note --dry-run
+claude-sessions memory cp ~/proj-a ~/proj-b coding-style
+claude-sessions memory export -o memory.md
+```
+
 ### tui
 
 ```sh
@@ -333,7 +367,7 @@ claude-sessions tui
 ```
 
 - 需要終端機（stdin 與 stdout）。
-- 列出所有專案（孤兒以紅色標示），按 `Enter` 開啟該目錄的選單：查看 sessions、在該目錄開 shell、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
+- 列出所有專案（孤兒以紅色標示；`MEM` 欄為 memory 檔數，只有 memory 的專案也會列出），按 `Enter` 開啟該目錄的選單：查看 sessions、查看 memory、在該目錄開 shell、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
 - `--cd-file FILE`：「離開並 cd」把選到的目錄寫到這個檔案（預設在離開 TUI 後印到 stdout）。
 - 支援 `--claude-dir` 與 `--color`。
 - 以 `--no-default-features` 建置可不含 TUI（及其 `ratatui` 依賴）。
@@ -345,19 +379,32 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | 第一列 / 最後一列 |
 | `Space` | 勾選並往下移（閱讀時為下一頁） |
 | `a` | 全選 / 全不選 |
-| `Enter` | 專案：選單（`s` 看 sessions、`h` 在該目錄開 shell — `exit` 回到列表、`x` 離開並 cd）；session 列表：閱讀 |
+| `Enter` | 專案：選單（`s` 看 sessions、`m` 看 memory、`h` 在該目錄開 shell — `exit` 回到列表、`x` 離開並 cd）；session / memory 列表：閱讀 |
 | `→` | 開啟專案的 sessions，或閱讀 session |
+| `M` | 開啟游標所在專案的 auto-memory（專案列表），或目前專案的 memory（Sessions 檢視） |
+| `S` | Memory 檢視：切到該專案的 sessions |
 | `Esc` / `←` | 返回（最上層的 `Esc` 先清除過濾，再按則離開；`←` 不會離開） |
 | `/` | 過濾（`Enter` 確認，`Esc` 清除） |
 | `o` | 只看孤兒 |
 | `s` | 切換排序：path、size、last used |
 | `d` | 刪除已勾選的列（沒勾選就是游標所在列）；`y` 確認，`n` / `Esc` 取消，`p` 切換 `--purge-config` |
 | `m` / `c` | 搬移 / 複製專案目錄（詢問目標路徑，執行 `mv` / `cp` 後等待 `Enter`） |
-| `e` | 把 session 匯出成 Markdown（預設檔名 `<id>.md`；於 Sessions 檢視） |
+| `e` | Sessions 檢視：把 session 匯出成 Markdown（預設檔名 `<id>.md`）；Memory 檢視或閱讀 memory 時：用 `$EDITOR` 編輯該檔 |
+| `x` | Memory 檢視：把整個專案的 memory 匯出成 Markdown（預設檔名 `<目錄名>-memory.md`） |
 | `r` | 重新載入 |
-| `?` | 顯示所有按鍵 |
+| `?` | 顯示目前頁面的按鍵（在專案列表會一併列出 `Enter` 選單的操作） |
 | `q` / `Ctrl-C` | 離開 |
 
+- 標題列會顯示游標位置：`n/總數` 與游標所在專案（或 session / memory 檔）的完整路徑，太長時從左邊截掉。
+- 從專案的 sessions 或 memory 返回時，游標會回到原本那個專案。
+- Memory 檢視的 `d` 會刪除勾選的 memory 檔並移除其索引行（同 `memory rm`）；`p` 在此不適用。
+- 程式無法改變父 shell 的目錄，所以 `x` 是把路徑交回來。把下面函式加進 `~/.zshrc` / `~/.bashrc` 就能真的 `cd`：
+
+  ```sh
+  cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
+  ```
+
+- 用 `h` 開出的 shell 會帶有 `CLAUDE_SESSIONS_TUI=1`，可用來在提示字元標示目前在 TUI 之下。
 - 若 Claude Code 正在受影響的目錄執行，刪除會被拒絕；開啟 `--purge-config` 時，只要有任何 Claude Code 在執行就會拒絕。
 
 ## 與 `claude purge` 的分工
@@ -376,7 +423,7 @@ claude-sessions tui
 
 ## 備份
 
-`mv`、`rm`/`clean --purge-config`、`doctor --fix` 在改寫 `history.jsonl` 或 `~/.claude.json` 之前，會先把檔案複製到同一個資料夾。
+`mv`、`rm`/`clean --purge-config`、`doctor --fix` 在改寫 `history.jsonl` 或 `~/.claude.json` 之前，以及 `memory rm`/`cp` 在改寫 `MEMORY.md` 之前，會先把檔案複製到同一個資料夾。
 
 - **檔名**：`<原檔名>.claude-sessions-<UTC 時間>.bak`，例如 `history.jsonl.claude-sessions-20261008T083342Z.bak`。
 - **不會覆蓋**：檔名專屬於本工具。
@@ -389,6 +436,7 @@ claude-sessions tui
 |---|---|
 | `doctor --fix` | …完整還原：只移除了失效紀錄，沒有刪任何 session。 |
 | `rm` / `clean --purge-config` | …只能找回「被移除了什麼」的**紀錄**。session 本身已永久刪除，還原的 history 行會指向已不存在的對話。 |
+| `memory rm` / `cp` | …可還原 `MEMORY.md` 的索引行。被 `memory rm` 刪掉的檔案無法找回。 |
 | `mv` | …光靠備份不夠：session 檔裡被改寫的 `cwd` 與改名的資料夾沒有備份。請改用 `claude-sessions mv <新> <舊>` 還原。 |
 
 ## 發行（維護者）

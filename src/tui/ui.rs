@@ -2,10 +2,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use super::app::{App, Mode, View};
+use super::app::{App, Effect, Mode, View};
 use crate::export::Turn;
 
 /// Wrap `text` to `width` display columns (CJK counts double), keeping explicit newlines.
@@ -55,6 +55,89 @@ fn when(t: &Option<String>) -> String {
     t.as_deref().map(|s| s.chars().take(16).collect::<String>().replace('T', " ")).unwrap_or_else(|| "-".into())
 }
 
+/// Cuts `s` from the left to at most `w` cells, so its end (the current row) stays visible.
+fn tail(s: &str, w: usize) -> String {
+    if s.width() <= w {
+        return s.to_string();
+    }
+    let mut kept = Vec::new();
+    let mut used = 1; // the `…`
+    for c in s.chars().rev() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        kept.push(c);
+        used += cw;
+    }
+    format!("…{}", kept.iter().rev().collect::<String>())
+}
+
+/// Page name and its keys for the `?` window; `Enter` menu keys included on the project list.
+fn help_lines(app: &App) -> (&'static str, Vec<(&'static str, &'static str)>) {
+    let list = [("↑↓ / j k", "move"), ("PgUp PgDn", "move 10 rows"), ("g G / Home End", "first / last"), ("Space", "tick + next"), ("a", "tick all / none"), ("/", "filter (Enter keep, Esc clear)")];
+    let read = [("↑↓ / j k", "scroll"), ("PgUp PgDn / b Space", "page"), ("g G / Home End", "top / bottom")];
+    let common = [("?", "this help"), ("q / Ctrl-C", "quit")];
+    let (name, mut v): (&str, Vec<(&str, &str)>) = match app.view {
+        View::Projects => {
+            let mut v = list.to_vec();
+            v.extend([
+                ("Enter", "menu for the directory:"),
+                ("  s", "  browse sessions"),
+                ("  m", "  browse auto-memory"),
+                ("  h", "  shell here (exit returns)"),
+                ("  x", "  quit and cd here"),
+                ("→", "open sessions"),
+                ("M", "open auto-memory"),
+                ("d", "delete ticked (or cursor) folders; p: purge config"),
+                ("m / c", "move / copy the directory + sessions"),
+                ("o", "orphans only"),
+                ("s", "cycle sort (path, size, last used)"),
+                ("r", "reload"),
+                ("Esc", "clear filter, then quit"),
+            ]);
+            ("Projects", v)
+        }
+        View::Sessions => {
+            let mut v = list.to_vec();
+            v.extend([
+                ("Enter / →", "read the session"),
+                ("d", "delete ticked (or cursor) sessions; p: purge config"),
+                ("e", "export the session as Markdown"),
+                ("M", "this project's auto-memory"),
+                ("r", "reload"),
+                ("Esc / ←", "back to projects"),
+            ]);
+            ("Sessions", v)
+        }
+        View::Memory => {
+            let mut v = list.to_vec();
+            v.extend([
+                ("Enter / →", "read the file"),
+                ("e", "edit in $EDITOR"),
+                ("d", "delete ticked (or cursor) files + their MEMORY.md lines"),
+                ("x", "export all memory as Markdown"),
+                ("S", "this project's sessions"),
+                ("r", "reload"),
+                ("Esc / ←", "back to projects"),
+            ]);
+            ("Memory", v)
+        }
+        View::Session => {
+            let mut v = read.to_vec();
+            v.push(("Esc / ←", "back to the sessions"));
+            ("Reading a session", v)
+        }
+        View::MemoryFile => {
+            let mut v = read.to_vec();
+            v.extend([("e", "edit in $EDITOR"), ("Esc / ←", "back to the memory list")]);
+            ("Reading a memory file", v)
+        }
+    };
+    v.extend(common);
+    (name, v)
+}
+
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
@@ -65,8 +148,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let [head, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
 
     let place = match app.view {
-        View::Projects => format!("{} project(s)", app.visible_projects().len()),
-        View::Sessions => app.rows.get(app.proj).map(|p| p.cwd.display().to_string()).unwrap_or_default(),
+        View::Projects | View::Sessions | View::Memory => app.cursor_label().unwrap_or_default(),
         View::Session => app
             .rows
             .get(app.proj)
@@ -75,11 +157,18 @@ pub fn draw(f: &mut Frame, app: &App) {
                 format!("{} › {} {}", p.cwd.display(), s.map(|s| s.id.chars().take(8).collect::<String>()).unwrap_or_default(), s.and_then(|s| s.title.clone()).unwrap_or_default())
             })
             .unwrap_or_default(),
+        View::MemoryFile => {
+            let file = app.memo.as_ref().and_then(|(p, _)| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            app.rows.get(app.proj).map(|p| format!("{} › memory › {file}", p.cwd.display())).unwrap_or_default()
+        }
     };
+    let sort = format!("  sort: {}", app.sort.label());
+    // Leave room for the name and sort; the path is cut from the left so the current row stays visible.
+    let room = (head.width as usize).saturating_sub(" claude-sessions ".len() + sort.len() + 12);
     let mut title = vec![
         Span::styled(" claude-sessions ", Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan)),
-        Span::raw(place),
-        Span::styled(format!("  sort: {}", app.sort.label()), Style::new().fg(Color::DarkGray)),
+        Span::raw(tail(&place, room)),
+        Span::styled(sort, Style::new().fg(Color::DarkGray)),
     ];
     if app.only_orphans {
         title.push(Span::styled("  [orphans only]", Style::new().fg(Color::Yellow)));
@@ -108,6 +197,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                         if r.orphan { "gone".into() } else { String::new() },
                         r.cwd.display().to_string(),
                         r.sessions.len().to_string(),
+                        if r.memory.is_empty() { "-".into() } else { r.memory.len().to_string() },
                         r.messages.to_string(),
                         mb(r.bytes),
                         when(&r.last),
@@ -115,8 +205,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     .style(style)
                 })
                 .collect();
-            let widths = [Constraint::Length(3), Constraint::Length(4), Constraint::Fill(1), Constraint::Length(8), Constraint::Length(7), Constraint::Length(9), Constraint::Length(16)];
-            let header = Row::new(["", "", "DIRECTORY", "SESSIONS", "MSGS", "SIZE", "LAST (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
+            let widths = [Constraint::Length(3), Constraint::Length(4), Constraint::Fill(1), Constraint::Length(8), Constraint::Length(4), Constraint::Length(7), Constraint::Length(9), Constraint::Length(16)];
+            let header = Row::new(["", "", "DIRECTORY", "SESSIONS", "MEM", "MSGS", "SIZE", "LAST (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
             state.select((!vis.is_empty()).then_some(app.cursor));
             f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
         }
@@ -142,11 +232,38 @@ pub fn draw(f: &mut Frame, app: &App) {
             state.select((!vis.is_empty()).then_some(app.cursor));
             f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
         }
-        View::Session => {}
+        View::Memory => {
+            let vis = app.visible_memory();
+            let p = &app.rows[app.proj.min(app.rows.len().saturating_sub(1))];
+            let rows: Vec<Row> = vis
+                .iter()
+                .map(|i| {
+                    let m = &p.memory[*i];
+                    let kind = if m.is_index() { "index".to_string() } else { m.kind.clone().unwrap_or_default() };
+                    Row::new(vec![
+                        if app.is_ticked(&m.file) { "[x]".to_string() } else { "[ ]".to_string() },
+                        m.file.clone(),
+                        kind,
+                        m.summary(),
+                        format!("{:.1} KB", m.bytes as f64 / 1024.0),
+                        when(&m.modified),
+                    ])
+                })
+                .collect();
+            let widths = [Constraint::Length(3), Constraint::Length(32), Constraint::Length(9), Constraint::Fill(1), Constraint::Length(8), Constraint::Length(16)];
+            let header = Row::new(["", "FILE", "TYPE", "DESCRIPTION", "SIZE", "MODIFIED (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
+            state.select((!vis.is_empty()).then_some(app.cursor));
+            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
+        }
+        View::Session | View::MemoryFile => {}
     }
-    if app.view == View::Session {
+    if matches!(app.view, View::Session | View::MemoryFile) {
         let inner = Rect { y: body.y + 1, height: body.height.saturating_sub(1), ..body };
-        let lines = session_lines(&app.turns, inner.width.saturating_sub(1) as usize);
+        let width = inner.width.saturating_sub(1) as usize;
+        let lines = match (&app.memo, app.view) {
+            (Some((_, text)), View::MemoryFile) => wrap(text, width).into_iter().map(Line::from).collect(),
+            _ => session_lines(&app.turns, width),
+        };
         let h = inner.height as usize;
         app.view_dims.set((h, lines.len()));
         let scroll = app.scroll.min(lines.len().saturating_sub(h));
@@ -159,22 +276,29 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let hint = match (&app.mode, app.view) {
         (Mode::Filter, _) => " type to filter · Enter keep · Esc clear".to_string(),
-        (_, View::Projects) => " ↑↓ move · Space tick · a all · Enter menu · → sessions · d delete · m move · c copy · / filter · o orphans · s sort · ? help · q quit".to_string(),
-        (_, View::Sessions) => " ↑↓ move · Space tick · a all · d delete · e export · / filter · Enter/→ read · Esc/← back · ? help · q quit".to_string(),
+        (_, View::Projects) => " ↑↓ move · Space tick · Enter menu · → sessions · M memory · d delete · m move · c copy · / filter · o orphans · s sort · ? help · q quit".to_string(),
+        (_, View::Sessions) => " ↑↓ move · Space tick · a all · d delete · e export · M memory · / filter · Enter/→ read · Esc/← back · ? help · q quit".to_string(),
         (_, View::Session) => " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · Esc/← back · ? help · q quit".to_string(),
+        (_, View::Memory) => " ↑↓ move · Space tick · Enter/→ read · e edit · d delete · x export · S sessions · / filter · Esc/← back · ? help · q quit".to_string(),
+        (_, View::MemoryFile) => " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · e edit · Esc/← back · ? help · q quit".to_string(),
     };
     let foot_text = if app.status.is_empty() { Span::styled(hint, Style::new().fg(Color::DarkGray)) } else { Span::styled(format!(" {}", app.status), Style::new().fg(Color::Yellow)) };
     f.render_widget(Paragraph::new(Line::from(foot_text)), foot);
 
     match &app.mode {
-        Mode::Confirm { question, .. } => {
+        Mode::Confirm { question, effect } => {
             let area = centered(f.area(), 70, 8);
             f.render_widget(Clear, area);
             let cfg = if app.purge_config { "ON  (history.jsonl lines + .claude.json entry are removed; backed up first)" } else { "off (prompt history and trust settings are kept)" };
+            let extra = if matches!(effect, Effect::DeleteMemory { .. }) {
+                "Their MEMORY.md lines go too (MEMORY.md is backed up first).".to_string()
+            } else {
+                format!("[p] also purge config: {cfg}")
+            };
             let text = vec![
                 Line::from(question.as_str()).style(Style::new().add_modifier(Modifier::BOLD)),
                 Line::from(""),
-                Line::from(format!("[p] also purge config: {cfg}")),
+                Line::from(extra),
                 Line::from(""),
                 Line::from("[y] delete   [n] cancel").style(Style::new().fg(Color::Yellow)),
             ];
@@ -188,11 +312,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         Mode::Menu { row } => {
             let Some(p) = app.rows.get(*row) else { return };
-            let area = centered(f.area(), 64, 8);
+            let area = centered(f.area(), 64, 9);
             f.render_widget(Clear, area);
             let off = if p.orphan { Style::new().fg(Color::DarkGray) } else { Style::new() };
+            let mem = if p.memory.is_empty() { "[m] Auto-memory (none)".to_string() } else { format!("[m] Auto-memory ({} file(s)): read, edit, delete", p.memory.len()) };
             let text = vec![
                 Line::from("[s] Browse sessions"),
+                Line::from(mem).style(if p.memory.is_empty() { Style::new().fg(Color::DarkGray) } else { Style::new() }),
                 Line::from("[h] Shell here (exit returns to this list)").style(off),
                 Line::from("[x] Quit and cd here (see README: shell wrapper)").style(off),
                 Line::from(if p.orphan { "    directory no longer exists" } else { "" }).style(Style::new().fg(Color::Red)),
@@ -201,24 +327,20 @@ pub fn draw(f: &mut Frame, app: &App) {
             f.render_widget(Paragraph::new(text).block(Block::bordered().title(format!(" {} ", p.cwd.display()))), area);
         }
         Mode::Help => {
-            let area = centered(f.area(), 70, 21);
+            let (name, keys) = help_lines(app);
+            let kw = keys.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+            let mut lines: Vec<Line> = keys
+                .iter()
+                .map(|(k, d)| Line::from(vec![Span::styled(format!("{k:<kw$}  "), Style::new().fg(Color::Cyan)), Span::raw(*d)]))
+                .collect();
+            if matches!(app.view, View::Projects | View::Sessions | View::Memory) {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Deleting is refused while Claude Code runs in that directory.").style(Style::new().fg(Color::DarkGray)));
+            }
+            let w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4;
+            let area = centered(f.area(), w.max(40), lines.len() as u16 + 2);
             f.render_widget(Clear, area);
-            let text = "\
-↑↓ / j k    move          g G / Home End   first / last
-Space       tick + next   a                tick all / none
-Enter       project: menu (sessions / shell / cd) · session: read
-→           open sessions    Esc / ←  back (Esc: clear / quit)
-Reading:    ↑↓ j k scroll · PgUp PgDn b Space page · g G top / bottom
-/           filter        o                orphans only
-s           cycle sort (path, size, last used)
-d           delete ticked (or the row under the cursor)
-            p in the dialog: also purge history/.claude.json
-m  c        move / copy the project's directory + sessions
-e           export the session as Markdown
-r           reload        q                quit
-
-Deleting is refused while Claude Code runs in that directory.";
-            f.render_widget(Paragraph::new(text).block(Block::bordered().title(" Help — any key closes ")), area);
+            f.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!(" Help — {name} — any key closes "))), area);
         }
         _ => {}
     }
@@ -243,6 +365,7 @@ mod tests {
             messages: 7,
             last: s.last.clone(),
             sessions: vec![s],
+            memory: vec![],
         }])
     }
 
@@ -273,7 +396,8 @@ mod tests {
         let mut a = app();
         a.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let out = render(&a);
-        assert!(out.contains("Help") && out.contains("orphans only") && out.contains("Space"), "{out}");
+        assert!(out.contains("Help — Projects") && out.contains("orphans only") && out.contains("Space"), "{out}");
+        assert!(out.contains("shell here") && out.contains("browse auto-memory") && out.contains("quit and cd here"), "Enter menu keys are listed: {out}");
         a.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(!render(&a).contains("Help"));
     }
@@ -300,6 +424,65 @@ mod tests {
         assert!(out.contains("User · 2026-01-02 03:04") && out.contains("how are you") && out.contains("Assistant") && out.contains('你') && out.contains('很'), "{out}");
         a.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(a.view, View::Sessions);
+    }
+
+    #[test]
+    fn memory_view_lists_files_and_reads_one() {
+        let mut a = app();
+        a.rows[0].memory = vec![crate::memory::MemoryFile {
+            file: "feedback-x.md".into(),
+            path: "/c/projects/-x/memory/feedback-x.md".into(),
+            name: Some("x".into()),
+            description: Some("prefer filter-repo".into()),
+            kind: Some("feedback".into()),
+            bytes: 2048,
+            modified: Some("2026-01-02T03:04:05Z".into()),
+        }];
+        a.view = View::Memory;
+        let out = render(&a);
+        assert!(out.contains("feedback-x.md") && out.contains("feedback") && out.contains("prefer filter-repo") && out.contains("2.0 KB") && out.contains("› memory"), "{out}");
+        a.view = View::MemoryFile;
+        a.memo = Some(("/c/projects/-x/memory/feedback-x.md".into(), "記住這件事\nline two".into()));
+        let out = render(&a);
+        assert!(out.contains("memory › feedback-x.md") && out.contains('記') && out.contains("line two") && out.contains("e edit"), "{out}");
+    }
+
+    #[test]
+    fn help_lists_the_keys_of_the_current_page() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut a = app();
+        a.rows[0].memory = vec![crate::memory::MemoryFile {
+            file: "MEMORY.md".into(),
+            path: "/m".into(),
+            name: None,
+            description: None,
+            kind: None,
+            bytes: 1,
+            modified: None,
+        }];
+        let mut help_in = |view: View| {
+            a.view = view;
+            a.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+            let out = render(&a);
+            a.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+            out
+        };
+        let mem = help_in(View::Memory);
+        assert!(mem.contains("Help — Memory") && mem.contains("edit in $EDITOR") && mem.contains("MEMORY.md lines"), "{mem}");
+        let ses = help_in(View::Sessions);
+        assert!(ses.contains("Help — Sessions") && ses.contains("export the session") && !ses.contains("quit and cd"), "{ses}");
+        let read = help_in(View::Session);
+        assert!(read.contains("Reading a session") && !read.contains("tick"), "{read}");
+    }
+
+    #[test]
+    fn title_bar_shows_the_row_under_the_cursor_cut_from_the_left() {
+        let mut a = app();
+        a.rows[0].cwd = format!("/very/{}/deep/project-name", "long-segment/".repeat(12)).into();
+        let top = render(&a).lines().next().unwrap().to_string();
+        assert!(top.contains("…") && top.contains("deep/project-name") && top.contains("sort: path"), "{top}");
+        assert_eq!(tail("abc", 10), "abc");
+        assert_eq!(tail("路徑很長的目錄", 7), "…的目錄", "CJK counts two cells");
     }
 
     #[test]

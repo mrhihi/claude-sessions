@@ -102,7 +102,7 @@ pub fn run(o: &Opts) -> Result<()> {
     for s in &steps {
         println!(
             "  {}  {} {} {}",
-            style::yellow(&format!("{} session(s)", session_files(&s.project.dir).len())),
+            style::yellow(&format!("{} session(s){}", session_files(&s.project.dir).len(), crate::mv::memory_note(&s.project.dir))),
             style::dim(&folder(&s.project.dir)),
             style::dim("→"),
             style::green(&folder(&s.new_dir))

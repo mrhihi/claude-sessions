@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::mv::{claude_json_path, running_claudes};
 use crate::rm;
-use crate::sidecar::{self, Edit, count_files, looks_like_session_id, path_size, remove_path};
+use crate::sidecar::{self, Edit, looks_like_session_id, path_size, remove_path};
 use crate::scan::{list_projects, projects_root, session_files};
 use crate::style;
 
@@ -133,7 +133,7 @@ fn find_empty_projects(claude_dir: &Path) -> Vec<EmptyProject> {
         if other {
             continue;
         }
-        out.push(EmptyProject { memory_files: count_files(&dir.join("memory")), path: dir });
+        out.push(EmptyProject { memory_files: crate::memory::count(&dir), path: dir });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
@@ -224,6 +224,7 @@ pub fn fix(claude_dir: &Path, dry_run: bool, yes: bool, force: bool, delete: boo
             force: true,
             purge_config: false,
             interactive: false,
+            keep_memory: false,
         })?
     } else {
         vec![]
@@ -314,7 +315,7 @@ pub fn fix(claude_dir: &Path, dry_run: bool, yes: bool, force: bool, delete: boo
         println!("{}", style::green("✔ Records fixed. To undo, copy a backup over the original file."));
     }
     if delete {
-        let opts = rm::Opts { claude_dir: claude_dir.to_path_buf(), target: None, older_than: None, dry_run: false, yes: true, force, purge_config: false, interactive: false };
+        let opts = rm::Opts { claude_dir: claude_dir.to_path_buf(), target: None, older_than: None, dry_run: false, yes: true, force, purge_config: false, interactive: false, keep_memory: false };
         let done = rm::execute(&opts, &items)?;
         for d in &diag.dangling {
             remove_path(&d.path)?;

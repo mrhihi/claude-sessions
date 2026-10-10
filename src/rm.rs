@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 
 use crate::mv::{conflicts, running_claudes};
 use crate::scan::{list_projects, resolve, session_files, strip_prefix_ci};
-use crate::sidecar::{self, Edit, count_files, path_size, remove_path, session_ids, sidecar_paths};
+use crate::sidecar::{self, Edit, path_size, remove_path, session_ids, sidecar_paths};
 use crate::stats::analyze_session;
 use crate::style;
 use crate::timespec::{iso, now_secs};
@@ -26,6 +26,8 @@ pub struct Opts {
     pub purge_config: bool,
     /// Ask about every folder instead of once for all.
     pub interactive: bool,
+    /// When a whole folder goes, keep its auto-memory (`memory/`).
+    pub keep_memory: bool,
 }
 
 /// One project folder (or some of its sessions) that is about to go.
@@ -42,6 +44,8 @@ pub struct Item {
     pub bytes: u64,
     /// Files in the project's auto-memory folder, which goes with a whole-folder delete.
     pub memory_files: usize,
+    /// Delete everything of a whole folder but its `memory/`.
+    pub keep_memory: bool,
 }
 
 fn ids_bytes(claude_dir: &Path, ids: &[String]) -> u64 {
@@ -52,14 +56,14 @@ fn ids_bytes(claude_dir: &Path, ids: &[String]) -> u64 {
 pub fn project_item(claude_dir: &Path, dir: &Path, cwd: &Path) -> Item {
     let ids = session_ids(dir);
     let bytes = path_size(dir) + ids_bytes(claude_dir, &ids);
-    Item { dir: dir.to_path_buf(), cwd: cwd.to_path_buf(), whole: true, files: vec![], ids, sessions: session_files(dir).len(), bytes, memory_files: count_files(&dir.join("memory")) }
+    Item { dir: dir.to_path_buf(), cwd: cwd.to_path_buf(), whole: true, files: vec![], ids, sessions: session_files(dir).len(), bytes, memory_files: crate::memory::count(dir), keep_memory: false }
 }
 
 /// Just these transcripts of a project folder, with their per-session data.
 pub fn sessions_item(claude_dir: &Path, dir: &Path, cwd: &Path, files: Vec<PathBuf>) -> Item {
     let ids: Vec<String> = files.iter().filter_map(|f| f.file_stem()).map(|s| s.to_string_lossy().into_owned()).collect();
     let bytes = files.iter().map(|f| path_size(f) + path_size(&f.with_extension(""))).sum::<u64>() + ids_bytes(claude_dir, &ids);
-    Item { dir: dir.to_path_buf(), cwd: cwd.to_path_buf(), whole: false, sessions: files.len(), files, ids, bytes, memory_files: 0 }
+    Item { dir: dir.to_path_buf(), cwd: cwd.to_path_buf(), whole: false, sessions: files.len(), files, ids, bytes, memory_files: 0, keep_memory: false }
 }
 
 pub fn plan(o: &Opts) -> Result<Vec<Item>> {
@@ -73,7 +77,14 @@ pub fn plan(o: &Opts) -> Result<Vec<Item>> {
             _ => {}
         }
         match &cutoff {
-            None => items.push(project_item(&o.claude_dir, &p.dir, &p.cwd)),
+            None => {
+                let mut i = project_item(&o.claude_dir, &p.dir, &p.cwd);
+                if o.keep_memory && i.memory_files > 0 {
+                    i.keep_memory = true;
+                    i.bytes -= path_size(&crate::memory::dir_of(&p.dir));
+                }
+                items.push(i);
+            }
             Some(c) => {
                 let files: Vec<PathBuf> = session_files(&p.dir)
                     .into_iter()
@@ -91,7 +102,9 @@ pub fn plan(o: &Opts) -> Result<Vec<Item>> {
 /// The `history.jsonl` / `.claude.json` rewrites `--purge-config` would make for `items`.
 pub fn config_edits(claude_dir: &Path, items: &[Item]) -> Result<Vec<Edit>> {
     let ids: HashSet<&str> = items.iter().flat_map(|i| i.ids.iter().map(String::as_str)).collect();
-    let whole: HashSet<String> = items.iter().filter(|i| i.whole).map(|i| i.cwd.display().to_string()).collect();
+    // A folder that keeps its memory keeps its `.claude.json` entry and history too, so
+    // the memory can still be told apart and found.
+    let whole: HashSet<String> = items.iter().filter(|i| i.whole && !i.keep_memory).map(|i| i.cwd.display().to_string()).collect();
     let mut edits = Vec::new();
     let field = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     edits.extend(sidecar::plan_history(claude_dir, |v| {
@@ -116,7 +129,13 @@ pub struct Done {
 pub fn execute(o: &Opts, items: &[Item]) -> Result<Done> {
     let edits = if o.purge_config { config_edits(&o.claude_dir, items)? } else { vec![] };
     for i in items {
-        if i.whole {
+        if i.whole && i.keep_memory {
+            for e in std::fs::read_dir(&i.dir)?.flatten() {
+                if e.file_name() != crate::memory::DIR {
+                    remove_path(&e.path())?;
+                }
+            }
+        } else if i.whole {
             remove_path(&i.dir)?;
         } else {
             for f in &i.files {
@@ -185,7 +204,11 @@ pub fn run(o: &Opts) -> Result<()> {
             style::yellow(&format!("{} session(s)", i.sessions)),
             style::cyan(&i.cwd.display().to_string()),
             style::dim(&mb(i.bytes)),
-            if i.memory_files > 0 { style::yellow(&format!("  (+{} memory file(s))", i.memory_files)) } else { String::new() }
+            match (i.memory_files, i.keep_memory) {
+                (0, _) => String::new(),
+                (n, true) => style::dim(&format!("  ({n} memory file(s) kept)")),
+                (n, false) => style::yellow(&format!("  (+{n} memory file(s))")),
+            }
         );
     }
 
@@ -284,7 +307,7 @@ mod tests {
     }
 
     fn opts(claude: PathBuf, target: Option<PathBuf>, older: Option<i64>, dry_run: bool) -> Opts {
-        Opts { claude_dir: claude, target, older_than: older, dry_run, yes: true, force: true, purge_config: false, interactive: false }
+        Opts { claude_dir: claude, target, older_than: older, dry_run, yes: true, force: true, purge_config: false, interactive: false, keep_memory: false }
     }
 
     #[test]
@@ -293,6 +316,24 @@ mod tests {
         let (claude, alive, _) = setup(&tmp.path().canonicalize().unwrap());
         run(&opts(claude.clone(), Some(alive), None, true)).unwrap();
         assert!(claude.join("projects/a/old.jsonl").exists());
+    }
+
+    #[test]
+    fn keep_memory_leaves_the_memory_folder_and_its_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (claude, proj, _) = setup(&tmp.path().canonicalize().unwrap());
+        let p = list_projects(&claude).unwrap().into_iter().find(|p| p.cwd == proj).unwrap();
+        fs::create_dir_all(p.dir.join("memory")).unwrap();
+        fs::write(p.dir.join("memory/MEMORY.md"), "- [a](a.md)\n").unwrap();
+        fs::write(claude.join(".claude.json"), format!("{{\"projects\":{{{}:{{}}}}}}", q(&proj))).unwrap();
+        let mut o = opts(claude.clone(), Some(proj.clone()), None, false);
+        o.keep_memory = true;
+        let items = plan(&o).unwrap();
+        assert!(items.iter().any(|i| i.keep_memory));
+        assert!(config_edits(&claude, &items).unwrap().is_empty());
+        execute(&o, &items).unwrap();
+        assert!(p.dir.join("memory/MEMORY.md").is_file());
+        assert!(session_files(&p.dir).is_empty());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use crate::mv::{conflicts, running_claudes};
-use crate::{cp, export, mv, rm, stats};
+use crate::{cp, export, memory, mv, rm, scan, stats};
 use app::{App, Effect, ProjectRow};
 
 fn find<'a>(app: &'a App, dir: &Path) -> Option<&'a ProjectRow> {
@@ -22,7 +22,7 @@ fn find<'a>(app: &'a App, dir: &Path) -> Option<&'a ProjectRow> {
 }
 
 fn rm_opts(claude_dir: &Path, purge_config: bool) -> rm::Opts {
-    rm::Opts { claude_dir: claude_dir.to_path_buf(), target: None, older_than: None, dry_run: false, yes: true, force: false, purge_config, interactive: false }
+    rm::Opts { claude_dir: claude_dir.to_path_buf(), target: None, older_than: None, dry_run: false, yes: true, force: false, purge_config, interactive: false, keep_memory: false }
 }
 
 /// Deletes `items` unless Claude Code is running where it would matter. Returns the status line.
@@ -104,6 +104,25 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, eff
         },
         Effect::Move { src, dst } => outside(terminal, || mv::run(&mv::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_move_files: false, force: false }), true)?,
         Effect::Copy { src, dst } => outside(terminal, || cp::run(&cp::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_copy_files: false }), true)?,
+        Effect::EditMemory(path) => outside(terminal, || memory::open_in_editor(&path), false)?,
+        Effect::DeleteMemory { dir, files } => match find(app, &dir) {
+            Some(r) => {
+                let project = scan::Project { dir: r.dir.clone(), cwd: r.cwd.clone() };
+                let picked: Vec<memory::MemoryFile> = r.memory.iter().filter(|m| files.contains(&m.file)).cloned().collect();
+                match memory::check_running(claude_dir, &project).and_then(|_| memory::remove(&r.dir, &picked)) {
+                    Ok(d) => format!("Deleted {} memory file(s), {} MEMORY.md line(s){}", d.files, d.index_lines, if d.backup.is_some() { "; backup kept" } else { "" }),
+                    Err(e) => format!("Refused: {e:#}"),
+                }
+            }
+            None => "Project not found".into(),
+        },
+        Effect::ExportMemory { dir, path } => match find(app, &dir) {
+            Some(r) => match std::fs::write(&path, memory::to_markdown(&r.cwd, &r.memory)) {
+                Ok(()) => format!("Exported memory to {path}"),
+                Err(e) => format!("Export failed: {e}"),
+            },
+            None => "Project not found".into(),
+        },
         Effect::Export { dir, id, path } => match find(app, &dir) {
             Some(r) => {
                 let file = dir.join(format!("{id}.jsonl"));

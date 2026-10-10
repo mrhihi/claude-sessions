@@ -65,6 +65,7 @@ claude-sessions --all            # every directory Claude Code has run in on thi
 claude-sessions -s               # also list every session
 claude-sessions --since 7d       # only sessions active in the last 7 days
 claude-sessions mv <src> <dst>   # move a directory together with its sessions
+claude-sessions memory           # show this project's auto-memory
 claude-sessions tui              # browse and manage sessions interactively
 ```
 
@@ -80,6 +81,7 @@ claude-sessions tui              # browse and manage sessions interactively
 | [`doctor`](#doctor) | Find (and optionally fix) leftovers of missing directories |
 | [`search`](#search) | Search prompts and replies |
 | [`export`](#export) | Print one session as Markdown or JSON |
+| [`memory`](#memory) | Show, edit, delete, copy and export a project's auto-memory |
 | [`tui`](#tui) | Interactive browser |
 
 ### Global options
@@ -127,6 +129,7 @@ claude-sessions [PATH] [options]
 | `--no-default-excludes` | Drop the default excludes (`-x` names still apply) | off |
 
 - Every `--sort` key except `path` sorts descending.
+- The `MEM` column counts the project's auto-memory files (`memory_files` in JSON). Directories that have memory but no sessions are listed too (`--since` drops them).
 - Default excludes: `.git node_modules target .venv venv __pycache__ .idea .vscode dist build .next .cache`
 
 ```sh
@@ -152,7 +155,7 @@ claude-sessions mv <SRC> <DST> [options]
 What it changes:
 
 - Moves the directory itself.
-- Renames the matching folders under `~/.claude/projects/`.
+- Renames the matching folders under `~/.claude/projects/`; the auto-memory inside them (`memory/`) goes along, including folders that hold only memory and no sessions.
 - Rewrites the directory fields in the session jsonl files: `cwd`, `relocatedCwd`, `projectPath`, `live_cwd`, `workingDirectory`, `realParentDir` (tool inputs/outputs and message text are history and stay as they were).
 - Rewrites `history.jsonl` and `~/.claude.json` (both backed up first, see [Backups](#backups)).
 
@@ -187,6 +190,7 @@ claude-sessions cp <SRC> <DST> [options]
 - The same path errors as `mv` apply, plus copying onto itself.
 - The directory is copied with the system `cp -a`.
 - Only the copies get the new `cwd`; originals keep pointing at `SRC`.
+- Auto-memory is copied too (including folders that hold only memory).
 - `history.jsonl` and `.claude.json` are left alone, so Claude asks to trust the new directory.
 - There is no `--force` and no running-Claude check.
 
@@ -206,13 +210,15 @@ claude-sessions clean [options]       # projects whose directory no longer exist
 | `-y`, `--yes` | Skip the `[y/N]` confirmation |
 | `-i`, `--interactive` | Ask per folder: `y` / `n` / `a` (all) / `q` (quit). Cannot be combined with `-y`. |
 | `--purge-config` | Also clean `history.jsonl` and `.claude.json` (see below) |
+| `--keep-memory` | When a whole folder goes, keep its `memory/` (and the project's `.claude.json` entry and history lines, so the memory can still be tied to its directory) |
 | `--force` | Override the running-Claude guards |
 
 Safety rules:
 
 - Asks for confirmation unless `-y` is given.
 - Refuses while Claude Code runs in an affected directory (`--force` overrides).
-- Plans show `(+N memory file(s))` when a folder holds auto-memory.
+- Plans show `(+N memory file(s))` when a folder holds auto-memory, or `(N memory file(s) kept)` with `--keep-memory`.
+- Folders that hold only memory and no sessions are never deleted by `rm` / `clean`; use [`memory rm`](#memory) for memory.
 
 What gets deleted besides transcripts:
 
@@ -289,11 +295,13 @@ claude-sessions search <KEYWORD> [options]
 | `-i`, `--ignore-case` | Case-insensitive match | case-sensitive |
 | `--path <DIR>` | Only sessions of this directory and below | all projects |
 | `--limit <N>` | Stop after N matching messages | `20` |
+| `--no-memory` | Don't search the auto-memory files | searched |
 
+- A `Memory` block comes first: one hit per matching memory file (file, directory, first matching line). These count toward `--limit`.
 - It searches the same text as `export`, including `[tool: …]` lines.
 - Each session prints its 8-character id, title and directory.
 - Each hit prints role, `YYYY-MM-DD HH:MM` and a snippet (first matching line of the message, with the match highlighted).
-- The footer shows `N match(es) in M session(s)`, a hint to raise `--limit` if it stopped early, or `(no matches)`.
+- The footer shows `N match(es) in M session(s)` (plus `and K memory file(s)` when memory matched), a hint to raise `--limit` if it stopped early, or `(no matches)`.
 
 ### export
 
@@ -319,6 +327,39 @@ Included and skipped:
 - Markdown starts with a title, then Session, Directory, Time (UTC) and Models lines; each turn is `## User|Assistant · timestamp`.
 - JSON is `{session, directory, turns[]}`; each turn has `role`, `timestamp`, `model`, `text`.
 
+### memory
+
+Manage Claude Code's auto-memory: the `MEMORY.md` index under `~/.claude/projects/<project>/memory/` (one line per memory, loaded at the start of every conversation) and one Markdown file per memory.
+
+```sh
+claude-sessions memory [PATH] [--all] [--json]          # list memory
+claude-sessions memory show [NAME] [--path DIR]         # print one file (default MEMORY.md)
+claude-sessions memory edit [NAME] [--path DIR]         # open it in your editor (default MEMORY.md)
+claude-sessions memory rm <NAME>... [--path DIR] [--dry-run] [-y] [--force]
+claude-sessions memory cp <SRC> <DST> [NAME...] [--dry-run] [--force]
+claude-sessions memory export [PATH] [--format md|json] [-o FILE]
+```
+
+| Command | What it does |
+|---|---|
+| `memory` | Lists file, type (frontmatter `type`) and description. `--all` covers every project, `--json` prints JSON. |
+| `show` / `edit` | `NAME` is the file name, the name without `.md`, the frontmatter `name`, or a unique prefix of these. The editor is `$VISUAL`, then `$EDITOR`, then `vi` (`notepad` on Windows). |
+| `rm` | Deletes the files and the `MEMORY.md` lines that link to them (`MEMORY.md` is backed up first, see [Backups](#backups)). Asks first; refuses while Claude Code runs in the project (`--force` overrides). |
+| `cp` | Copies memory from `SRC`'s project to `DST`'s and adds the index lines to the destination `MEMORY.md`. Without `NAME` everything is copied; refuses to overwrite a file of the same name (`--force` does). |
+| `export` | Prints all memory of a project as one Markdown or JSON document. |
+
+- Which project: Claude picks the memory folder by **git repository root**, so subdirectories and worktrees share one. `PATH` / `--path` (default: the current directory) uses its git root, or else the nearest directory above it that has memory.
+- If `memory cp`'s destination has no folder yet, one is created for its git root (or `DST` itself outside a repository).
+- If `autoMemoryDirectory` is set in `~/.claude/settings.json`, memory lives elsewhere; this tool only manages `projects/*/memory` and prints a note.
+
+```sh
+claude-sessions memory --all
+claude-sessions memory show feedback-history
+claude-sessions memory rm old-note --dry-run
+claude-sessions memory cp ~/proj-a ~/proj-b coding-style
+claude-sessions memory export -o memory.md
+```
+
 ### tui
 
 ```sh
@@ -326,7 +367,7 @@ claude-sessions tui
 ```
 
 - Needs a terminal (stdin and stdout).
-- Lists every project (orphans in red). `Enter` opens a menu for the directory: browse its sessions, open a shell there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
+- Lists every project (orphans in red; `MEM` counts memory files, and projects with only memory are listed too). `Enter` opens a menu for the directory: browse its sessions, browse its memory, open a shell there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
 - `--cd-file FILE`: where "quit and cd here" writes the chosen directory (default: print it to stdout after leaving the TUI).
 - `--claude-dir` and `--color` are honored.
 - Build with `--no-default-features` to leave the TUI (and its `ratatui` dependency) out.
@@ -338,19 +379,25 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | First / last |
 | `Space` | Tick and move on (page down when reading) |
 | `a` | Tick all / none |
-| `Enter` | Project: menu (`s` sessions, `h` shell here — `exit` returns to the list, `x` quit and cd here); session list: read it |
+| `Enter` | Project: menu (`s` sessions, `m` memory, `h` shell here — `exit` returns to the list, `x` quit and cd here); session / memory list: read it |
 | `→` | Open a project's sessions, or read a session |
+| `M` | Open the auto-memory of the project under the cursor (project list) or of the open project (Sessions view) |
+| `S` | Memory view: switch to the project's sessions |
 | `Esc` / `←` | Back (`Esc` in the top view clears the filter, then quits; `←` never quits) |
 | `/` | Filter (`Enter` confirms, `Esc` clears) |
 | `o` | Orphans only |
 | `s` | Cycle sort: path, size, last used |
 | `d` | Delete ticked rows (or the row under the cursor); confirm with `y`, cancel with `n` / `Esc`, `p` toggles `--purge-config` |
 | `m` / `c` | Move / copy the project directory (asks for the destination, runs `mv` / `cp`, then waits for `Enter`) |
-| `e` | Export the session as Markdown (default file `<id>.md`; Sessions view) |
+| `e` | Sessions view: export the session as Markdown (default file `<id>.md`). Memory view or reading a memory file: edit it in `$EDITOR` |
+| `x` | Memory view: export all of the project's memory as Markdown (default file `<dir name>-memory.md`) |
 | `r` | Reload |
-| `?` | Show all keys |
+| `?` | Show the keys of the current page (on the project list including the `Enter` menu) |
 | `q` / `Ctrl-C` | Quit |
 
+- The title bar shows where the cursor is: `n/total` and the full path of the project (or the session / memory file) under it, cut from the left when it doesn't fit.
+- Going back from a project's sessions or memory puts the cursor on that project again.
+- In the Memory view, `d` deletes the ticked memory files and their index lines (like `memory rm`); `p` does not apply there.
 - A program cannot change its parent shell's directory, so `x` hands the path back instead. Add this wrapper to `~/.zshrc` / `~/.bashrc` to really `cd`:
 
   ```sh
@@ -376,7 +423,7 @@ To remove one project completely, `claude purge <path>` is the right tool.
 
 ## Backups
 
-Before `mv`, `rm`/`clean --purge-config` or `doctor --fix` rewrite `history.jsonl` or `~/.claude.json`, the file is copied next to itself.
+Before `mv`, `rm`/`clean --purge-config` or `doctor --fix` rewrite `history.jsonl` or `~/.claude.json`, and before `memory rm`/`cp` rewrite a `MEMORY.md`, the file is copied next to itself.
 
 - **Name**: `<name>.claude-sessions-<UTC time>.bak`, for example `history.jsonl.claude-sessions-20261008T083342Z.bak`.
 - **Never overwritten**: the name is specific to this tool.
@@ -389,6 +436,7 @@ What a backup can bring back:
 |---|---|
 | `doctor --fix` | …fully undoes it: only stale records were removed, no session was deleted. |
 | `rm` / `clean --purge-config` | …only restores a *record* of what was removed. The sessions themselves are deleted for good, so the restored history lines point at conversations that no longer exist. |
+| `memory rm` / `cp` | …restores the `MEMORY.md` index lines. A file deleted by `memory rm` is gone for good. |
 | `mv` | …is not enough on its own: the rewritten `cwd` in the session files and the renamed folders are not backed up. Undo it with `claude-sessions mv <dst> <src>` instead. |
 
 ## Releasing (maintainers)

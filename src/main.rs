@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use claude_sessions::report::SortKey;
-use claude_sessions::{cp, doctor, export, mv, report, rm, scan, search, stats, style, timespec};
+use claude_sessions::{cp, doctor, export, memory, mv, report, rm, scan, search, stats, style, timespec};
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ColorChoice {
@@ -107,6 +107,23 @@ enum Cmd {
         /// Stop after this many matching messages
         #[arg(long, default_value_t = 20, value_name = "N")]
         limit: usize,
+        /// Don't search the auto-memory files
+        #[arg(long)]
+        no_memory: bool,
+    },
+    /// Show, edit, delete, copy and export the auto-memory of a project
+    Memory {
+        /// Directory whose memory to list (default: current directory; its git root's memory applies)
+        #[arg(conflicts_with = "all")]
+        path: Option<PathBuf>,
+        /// List the memory of every project
+        #[arg(long, short = 'a')]
+        all: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        cmd: Option<MemoryCmd>,
     },
     /// Browse projects and sessions interactively: tick, delete, move, copy, export
     #[cfg(feature = "tui")]
@@ -158,6 +175,9 @@ enum Cmd {
         /// Proceed even if Claude Code is running in those directories
         #[arg(long)]
         force: bool,
+        /// When a whole folder goes, keep its auto-memory (and its .claude.json entry)
+        #[arg(long)]
+        keep_memory: bool,
     },
     /// Delete session folders whose directory no longer exists (see `doctor`; `doctor --fix --delete` does this and more)
     Clean {
@@ -179,7 +199,93 @@ enum Cmd {
         /// Proceed even if Claude Code is running in those directories
         #[arg(long)]
         force: bool,
+        /// When a whole folder goes, keep its auto-memory (and its .claude.json entry)
+        #[arg(long)]
+        keep_memory: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Print one memory file (default: the MEMORY.md index)
+    Show {
+        /// File name, name without .md, frontmatter name, or a unique prefix
+        name: Option<String>,
+        /// Project directory (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+    },
+    /// Open one memory file in $VISUAL / $EDITOR (default: the MEMORY.md index)
+    Edit {
+        name: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+    },
+    /// Delete memory files and their MEMORY.md lines (MEMORY.md is backed up first)
+    Rm {
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+        /// Show what would be deleted without touching anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask for confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Proceed even if Claude Code is running in the project
+        #[arg(long)]
+        force: bool,
+    },
+    /// Copy memory files from one project to another and add their MEMORY.md lines
+    Cp {
+        src: PathBuf,
+        dst: PathBuf,
+        /// Files to copy (default: all)
+        names: Vec<String>,
+        /// Show what would be copied without touching anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite files that already exist in the destination
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print all memory files of a project as one Markdown or JSON document
+    Export {
+        path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "md")]
+        format: ExportFormat,
+        /// Write to this file instead of stdout
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+}
+
+fn write_out(text: String, output: Option<PathBuf>) -> Result<()> {
+    match output {
+        Some(o) => std::fs::write(&o, text).with_context(|| format!("cannot write {}", o.display())),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
+fn run_memory(claude_dir: PathBuf, path: Option<PathBuf>, all: bool, json: bool, cmd: Option<MemoryCmd>) -> Result<()> {
+    match cmd {
+        None => memory::run_list(&claude_dir, path.as_deref(), all, json),
+        Some(MemoryCmd::Show { name, path }) => memory::run_show(&claude_dir, path.as_deref(), name.as_deref()),
+        Some(MemoryCmd::Edit { name, path }) => memory::run_edit(&claude_dir, path.as_deref(), name.as_deref()),
+        Some(MemoryCmd::Rm { names, path, dry_run, yes, force }) => {
+            memory::run_rm(&claude_dir, &memory::RmOpts { path: path.as_deref(), names: &names, dry_run, yes, force })
+        }
+        Some(MemoryCmd::Cp { src, dst, names, dry_run, force }) => {
+            memory::run_cp(&claude_dir, &memory::CpOpts { src: &src, dst: &dst, names: &names, dry_run, force })
+        }
+        Some(MemoryCmd::Export { path, format, output }) => {
+            write_out(memory::export_text(&claude_dir, path.as_deref(), matches!(format, ExportFormat::Json))?, output)
+        }
+    }
 }
 
 fn parse_age(spec: Option<String>) -> Result<Option<i64>> {
@@ -225,17 +331,12 @@ fn run(cli: Cli) -> Result<()> {
                     format!("{}\n", serde_json::to_string_pretty(&v)?)
                 }
             };
-            match output {
-                Some(o) => std::fs::write(&o, text).with_context(|| format!("cannot write {}", o.display())),
-                None => {
-                    print!("{text}");
-                    Ok(())
-                }
-            }
+            write_out(text, output)
         }
-        Some(Cmd::Search { keyword, path, ignore_case, limit }) => {
-            search::run(&search::Opts { claude_dir, keyword, path, ignore_case, limit })
+        Some(Cmd::Search { keyword, path, ignore_case, limit, no_memory }) => {
+            search::run(&search::Opts { claude_dir, keyword, path, ignore_case, limit, memory: !no_memory })
         }
+        Some(Cmd::Memory { path, all, json, cmd }) => run_memory(claude_dir, path, all, json, cmd),
         #[cfg(feature = "tui")]
         Some(Cmd::Tui { cd_file }) => claude_sessions::tui::run(&claude_dir, cd_file.as_deref()),
         Some(Cmd::Doctor { fix: true, dry_run, yes, force, delete, .. }) => doctor::fix(&claude_dir, dry_run, yes, force, delete),
@@ -248,7 +349,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::Rm { path, older_than, dry_run, yes, purge_config, interactive, force }) => rm::run(&rm::Opts {
+        Some(Cmd::Rm { path, older_than, dry_run, yes, purge_config, interactive, force, keep_memory }) => rm::run(&rm::Opts {
             claude_dir,
             target: Some(path),
             older_than: parse_age(older_than)?,
@@ -257,8 +358,9 @@ fn run(cli: Cli) -> Result<()> {
             force,
             purge_config,
             interactive,
+            keep_memory,
         }),
-        Some(Cmd::Clean { older_than, dry_run, yes, purge_config, interactive, force }) => rm::run(&rm::Opts {
+        Some(Cmd::Clean { older_than, dry_run, yes, purge_config, interactive, force, keep_memory }) => rm::run(&rm::Opts {
             claude_dir,
             target: None,
             older_than: parse_age(older_than)?,
@@ -267,6 +369,7 @@ fn run(cli: Cli) -> Result<()> {
             force,
             purge_config,
             interactive,
+            keep_memory,
         }),
         None => {
             let view = report::View {

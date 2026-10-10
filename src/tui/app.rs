@@ -9,7 +9,8 @@ use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::export::{Turn, load_turns};
-use crate::scan::{list_projects, session_files};
+use crate::memory::{self, MemoryFile};
+use crate::scan::{list_all_projects, session_files};
 use crate::stats::{SessionStat, analyze_session};
 
 pub struct ProjectRow {
@@ -21,6 +22,8 @@ pub struct ProjectRow {
     pub bytes: u64,
     pub messages: u64,
     pub last: Option<String>,
+    /// Auto-memory files, `MEMORY.md` first.
+    pub memory: Vec<MemoryFile>,
 }
 
 impl ProjectRow {
@@ -31,7 +34,7 @@ impl ProjectRow {
 
 pub fn load(claude_dir: &Path) -> Result<Vec<ProjectRow>> {
     let mut rows = Vec::new();
-    for p in list_projects(claude_dir)? {
+    for p in list_all_projects(claude_dir)? {
         let mut sessions: Vec<SessionStat> = session_files(&p.dir).iter().map(|f| analyze_session(f)).collect();
         sessions.sort_by(|a, b| b.last.cmp(&a.last));
         rows.push(ProjectRow {
@@ -40,6 +43,7 @@ pub fn load(claude_dir: &Path) -> Result<Vec<ProjectRow>> {
             messages: sessions.iter().map(|s| s.messages).sum(),
             last: sessions.iter().filter_map(|s| s.last.clone()).max(),
             sessions,
+            memory: memory::list(&p.dir),
             dir: p.dir,
             cwd: p.cwd,
         });
@@ -70,6 +74,10 @@ pub enum View {
     Sessions,
     /// Reading one session's conversation.
     Session,
+    /// The auto-memory files of the drilled project.
+    Memory,
+    /// Reading one memory file.
+    MemoryFile,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +93,12 @@ pub enum Effect {
     Export { dir: PathBuf, id: String, path: String },
     /// Open a sub-shell in this directory; leaving it returns to the TUI.
     Shell(PathBuf),
+    /// Open this memory file in the editor.
+    EditMemory(PathBuf),
+    /// Delete these memory files (by file name) of one project folder.
+    DeleteMemory { dir: PathBuf, files: Vec<String> },
+    /// Write all memory of one project folder to a Markdown file.
+    ExportMemory { dir: PathBuf, path: String },
     /// Quit and hand this directory to the caller.
     Cd(PathBuf),
 }
@@ -94,6 +108,7 @@ pub enum InputKind {
     Move(PathBuf),
     Copy(PathBuf),
     Export { dir: PathBuf, id: String },
+    ExportMemory(PathBuf),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +144,8 @@ pub struct App {
     pub view_dims: Cell<(usize, usize)>,
     /// Cursor of the session list, restored when leaving `View::Session`.
     list_cursor: usize,
+    /// The memory file being read (`View::MemoryFile`) and its text.
+    pub memo: Option<(PathBuf, String)>,
 }
 
 impl App {
@@ -149,6 +166,7 @@ impl App {
             scroll: 0,
             view_dims: Cell::new((0, 0)),
             list_cursor: 0,
+            memo: None,
         }
     }
 
@@ -161,8 +179,20 @@ impl App {
             self.turns.clear();
             self.cursor = self.list_cursor;
         }
-        if self.view == View::Sessions && self.proj >= self.rows.len() {
+        if self.view == View::MemoryFile {
+            // Stay on the file (it may just have been edited) unless it is gone.
+            match self.memo.as_ref().and_then(|(p, _)| std::fs::read_to_string(p).ok().map(|t| (p.clone(), t))) {
+                Some(m) => self.memo = Some(m),
+                None => {
+                    self.view = View::Memory;
+                    self.memo = None;
+                    self.cursor = self.list_cursor;
+                }
+            }
+        }
+        if matches!(self.view, View::Sessions | View::Memory | View::MemoryFile) && self.proj >= self.rows.len() {
             self.view = View::Projects;
+            self.memo = None;
         }
         self.clamp();
     }
@@ -197,11 +227,23 @@ impl App {
         v
     }
 
+    /// Indices into the drilled project's `memory`.
+    pub fn visible_memory(&self) -> Vec<usize> {
+        let Some(p) = self.rows.get(self.proj) else { return vec![] };
+        (0..p.memory.len()).filter(|i| self.matches(&format!("{} {}", p.memory[*i].file, p.memory[*i].summary()))).collect()
+    }
+
+    fn memory_under_cursor(&self) -> Option<&MemoryFile> {
+        let p = self.rows.get(self.proj)?;
+        self.visible_memory().get(self.cursor).map(|i| &p.memory[*i])
+    }
+
     pub fn len(&self) -> usize {
         match self.view {
             View::Projects => self.visible_projects().len(),
             View::Sessions => self.visible_sessions().len(),
-            View::Session => 0,
+            View::Memory => self.visible_memory().len(),
+            View::Session | View::MemoryFile => 0,
         }
     }
 
@@ -219,20 +261,24 @@ impl App {
         match self.view {
             View::Projects => self.visible_projects().get(self.cursor).map(|i| self.rows[*i].key()),
             View::Sessions => self.visible_sessions().get(self.cursor).map(|i| self.rows[self.proj].sessions[*i].id.clone()),
-            View::Session => None,
+            View::Memory => self.memory_under_cursor().map(|m| m.file.clone()),
+            View::Session | View::MemoryFile => None,
+        }
+    }
+
+    /// Every key of the current list, in display order.
+    fn all_keys(&self) -> Vec<String> {
+        match self.view {
+            View::Projects => self.visible_projects().iter().map(|i| self.rows[*i].key()).collect(),
+            View::Sessions => self.visible_sessions().iter().map(|i| self.rows[self.proj].sessions[*i].id.clone()).collect(),
+            View::Memory => self.visible_memory().iter().map(|i| self.rows[self.proj].memory[*i].file.clone()).collect(),
+            View::Session | View::MemoryFile => vec![],
         }
     }
 
     /// What a delete would act on: the ticked rows, or the row under the cursor.
     fn targets(&self) -> Vec<String> {
-        let ticked: Vec<String> = match self.view {
-            View::Projects => self.visible_projects().iter().map(|i| self.rows[*i].key()).collect::<Vec<_>>(),
-            View::Sessions => self.visible_sessions().iter().map(|i| self.rows[self.proj].sessions[*i].id.clone()).collect(),
-            View::Session => vec![],
-        }
-        .into_iter()
-        .filter(|k| self.selected.contains(k))
-        .collect();
+        let ticked: Vec<String> = self.all_keys().into_iter().filter(|k| self.selected.contains(k)).collect();
         if ticked.is_empty() { self.cursor_key().into_iter().collect() } else { ticked }
     }
 
@@ -258,7 +304,15 @@ impl App {
                     effect: Effect::DeleteProjects(rows.iter().map(|r| r.dir.clone()).collect()),
                 };
             }
-            View::Session => {}
+            View::Session | View::MemoryFile => {}
+            View::Memory => {
+                let Some(p) = self.rows.get(self.proj) else { return };
+                let index = if keys.iter().any(|k| k == memory::INDEX) { " (incl. the MEMORY.md index)" } else { "" };
+                self.mode = Mode::Confirm {
+                    question: format!("Delete {} memory file(s){index} of {}?", keys.len(), p.cwd.display()),
+                    effect: Effect::DeleteMemory { dir: p.dir.clone(), files: keys },
+                };
+            }
             View::Sessions => {
                 let Some(p) = self.rows.get(self.proj) else { return };
                 let b: u64 = p.sessions.iter().filter(|s| keys.contains(&s.id)).map(|s| s.bytes).sum();
@@ -285,6 +339,12 @@ impl App {
     }
 
     fn ask_export(&mut self) {
+        if self.view == View::Memory {
+            let Some(p) = self.rows.get(self.proj) else { return };
+            let name = p.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
+            self.mode = Mode::Input { label: "Export memory to".into(), text: format!("{name}-memory.md"), kind: InputKind::ExportMemory(p.dir.clone()) };
+            return;
+        }
         if self.view != View::Sessions {
             return;
         }
@@ -322,7 +382,7 @@ impl App {
                     self.mode = Mode::Normal;
                     Some(effect)
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('p') if !matches!(effect, Effect::DeleteMemory { .. }) => {
                     self.purge_config = !self.purge_config;
                     None
                 }
@@ -345,6 +405,7 @@ impl App {
                             InputKind::Move(src) => Effect::Move { src, dst: t },
                             InputKind::Copy(src) => Effect::Copy { src, dst: t },
                             InputKind::Export { dir, id } => Effect::Export { dir, id, path: t },
+                            InputKind::ExportMemory(dir) => Effect::ExportMemory { dir, path: t },
                         });
                     }
                     KeyCode::Backspace => {
@@ -379,6 +440,11 @@ impl App {
                 self.mode = Mode::Normal;
                 self.open_project(row);
             }
+            KeyCode::Char('m') => {
+                self.mode = Mode::Normal;
+                self.open_memory(row);
+            }
+            KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('h') | KeyCode::Char('x') if orphan => {
                 self.mode = Mode::Normal;
                 self.status = format!("{} no longer exists", cwd.display());
@@ -404,6 +470,50 @@ impl App {
         self.cursor = 0;
     }
 
+    /// Shows the memory of project `row`, or says there is none.
+    fn open_memory(&mut self, row: usize) {
+        let Some(p) = self.rows.get(row) else { return };
+        if p.memory.is_empty() {
+            self.status = format!("{} has no auto-memory", p.cwd.display());
+            return;
+        }
+        self.open_project(row);
+        self.view = View::Memory;
+    }
+
+    /// Where the cursor is, for the title bar: `n/total` and the full path (or session /
+    /// memory file) of the row under it. `None` in the reading views.
+    pub fn cursor_label(&self) -> Option<String> {
+        let pos = |n: usize| format!("{}/{n}", (self.cursor + 1).min(n));
+        match self.view {
+            View::Projects => {
+                let vis = self.visible_projects();
+                Some(match vis.get(self.cursor) {
+                    Some(i) => format!("{} › {}", pos(vis.len()), self.rows[*i].cwd.display()),
+                    None => "0 project(s)".into(),
+                })
+            }
+            View::Sessions => {
+                let p = self.rows.get(self.proj)?;
+                let vis = self.visible_sessions();
+                let cur = vis.get(self.cursor).map(|i| &p.sessions[*i]);
+                Some(match cur {
+                    Some(s) => format!("{} › {} {} {}", p.cwd.display(), pos(vis.len()), s.id.chars().take(8).collect::<String>(), s.title.as_deref().unwrap_or("(untitled)")),
+                    None => format!("{} › no sessions", p.cwd.display()),
+                })
+            }
+            View::Memory => {
+                let p = self.rows.get(self.proj)?;
+                let vis = self.visible_memory();
+                Some(match self.memory_under_cursor() {
+                    Some(m) => format!("{} › memory › {} {}", p.cwd.display(), pos(vis.len()), m.file),
+                    None => format!("{} › memory", p.cwd.display()),
+                })
+            }
+            View::Session | View::MemoryFile => None,
+        }
+    }
+
     /// Enter / →: drill one level down.
     fn open(&mut self) {
         match self.view {
@@ -421,7 +531,16 @@ impl App {
                 self.view_dims.set((0, 0));
                 self.view = View::Session;
             }
-            View::Session => {}
+            View::Memory => {
+                let Some(path) = self.memory_under_cursor().map(|m| m.path.clone()) else { return };
+                let text = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("(cannot read: {e})"));
+                self.memo = Some((path, text));
+                self.list_cursor = self.cursor;
+                self.scroll = 0;
+                self.view_dims.set((0, 0));
+                self.view = View::MemoryFile;
+            }
+            View::Session | View::MemoryFile => {}
         }
     }
 
@@ -433,10 +552,16 @@ impl App {
                 self.turns.clear();
                 self.cursor = self.list_cursor;
             }
-            View::Sessions => {
+            View::MemoryFile => {
+                self.view = View::Memory;
+                self.memo = None;
+                self.cursor = self.list_cursor;
+            }
+            View::Sessions | View::Memory => {
                 self.view = View::Projects;
                 self.selected.clear();
-                self.cursor = 0;
+                // Back onto the project we came from (it may have moved after a sort or reload).
+                self.cursor = self.visible_projects().iter().position(|i| *i == self.proj).unwrap_or(0);
             }
             View::Projects => self.filter.clear(),
         }
@@ -469,6 +594,7 @@ impl App {
                 self.mode = Mode::Help;
                 return None;
             }
+            KeyCode::Char('e') if self.view == View::MemoryFile => return self.memo.as_ref().map(|(p, _)| Effect::EditMemory(p.clone())),
             _ => return None,
         };
         self.scroll = (self.scroll as isize).saturating_add(delta).clamp(0, self.max_scroll() as isize) as usize;
@@ -480,7 +606,7 @@ impl App {
             return Some(Effect::Quit);
         }
         self.status.clear();
-        if self.view == View::Session {
+        if matches!(self.view, View::Session | View::MemoryFile) {
             return self.key_session(key);
         }
         match key.code {
@@ -507,11 +633,7 @@ impl App {
                 }
             }
             KeyCode::Char('a') => {
-                let all: Vec<String> = match self.view {
-                    View::Projects => self.visible_projects().iter().map(|i| self.rows[*i].key()).collect(),
-                    View::Sessions => self.visible_sessions().iter().map(|i| self.rows[self.proj].sessions[*i].id.clone()).collect(),
-                    View::Session => vec![],
-                };
+                let all = self.all_keys();
                 if all.iter().all(|k| self.selected.contains(k)) {
                     self.selected.clear();
                 } else {
@@ -539,7 +661,18 @@ impl App {
             KeyCode::Char('d') => self.ask_delete(),
             KeyCode::Char('m') => self.ask_path(true),
             KeyCode::Char('c') => self.ask_path(false),
+            KeyCode::Char('M') if self.view == View::Projects => {
+                if let Some(i) = self.visible_projects().get(self.cursor).copied() {
+                    self.open_memory(i);
+                }
+            }
+            KeyCode::Char('M') if self.view == View::Sessions => self.open_memory(self.proj),
+            KeyCode::Char('S') if self.view == View::Memory => self.open_project(self.proj),
+            KeyCode::Char('e') if self.view == View::Memory => {
+                return self.memory_under_cursor().map(|m| Effect::EditMemory(m.path.clone()));
+            }
             KeyCode::Char('e') => self.ask_export(),
+            KeyCode::Char('x') if self.view == View::Memory => self.ask_export(),
             KeyCode::Char('r') => return Some(Effect::Reload),
             KeyCode::Char('?') => self.mode = Mode::Help,
             _ => {}
@@ -565,6 +698,7 @@ mod tests {
             messages: 0,
             last: sessions.iter().filter_map(|s| s.last.clone()).max(),
             sessions,
+            memory: vec![],
         }
     }
 
@@ -805,6 +939,130 @@ mod tests {
         assert_eq!(code(&mut app(), KeyCode::Esc), Some(Effect::Quit));
         let mut a = app();
         assert_eq!(a.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some(Effect::Quit));
+    }
+
+    fn memory_app() -> (tempfile::TempDir, App) {
+        let d = tempfile::tempdir().unwrap();
+        let mem = d.path().join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(mem.join("MEMORY.md"), "- [A](a.md) — first\n").unwrap();
+        std::fs::write(mem.join("a.md"), "---\nname: a\ndescription: first\n---\nalpha body\n").unwrap();
+        let mut r = row("/p", false, vec![]);
+        r.dir = d.path().to_path_buf();
+        r.memory = memory::list(&r.dir);
+        let mut plain = row("/q", false, vec![sess("q1", "2026-01-01", 1)]);
+        plain.dir = d.path().join("none");
+        (d, App::new(vec![r, plain]))
+    }
+
+    #[test]
+    fn menu_m_opens_memory_and_refuses_without_memory() {
+        let (_d, mut a) = memory_app();
+        code(&mut a, KeyCode::Down); // /q has no memory
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "m");
+        assert!(a.status.contains("no auto-memory"));
+        assert_eq!(a.view, View::Projects);
+        code(&mut a, KeyCode::Up);
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "m");
+        assert_eq!(a.view, View::Memory);
+        assert_eq!(a.visible_memory().len(), 2);
+        code(&mut a, KeyCode::Left);
+        assert_eq!(a.view, View::Projects);
+    }
+
+    #[test]
+    fn memory_view_reads_edits_deletes_and_exports() {
+        let (d, mut a) = memory_app();
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "m");
+        code(&mut a, KeyCode::Down); // a.md
+        assert_eq!(press(&mut a, "e"), vec![Effect::EditMemory(d.path().join("memory/a.md"))]);
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(a.view, View::MemoryFile);
+        assert!(a.memo.as_ref().unwrap().1.contains("alpha body"));
+        assert_eq!(press(&mut a, "e"), vec![Effect::EditMemory(d.path().join("memory/a.md"))]);
+        code(&mut a, KeyCode::Esc);
+        assert_eq!((a.view, a.cursor), (View::Memory, 1));
+        press(&mut a, "d");
+        let Mode::Confirm { effect, question } = a.mode.clone() else { panic!() };
+        assert!(!question.contains("index"), "{question}");
+        assert_eq!(effect, Effect::DeleteMemory { dir: d.path().to_path_buf(), files: vec!["a.md".into()] });
+        press(&mut a, "p");
+        assert!(!a.purge_config, "purge config does not apply to memory");
+        press(&mut a, "n");
+        press(&mut a, "x");
+        let Mode::Input { text, .. } = &a.mode else { panic!() };
+        assert_eq!(text, "p-memory.md");
+        assert_eq!(code(&mut a, KeyCode::Enter), Some(Effect::ExportMemory { dir: d.path().to_path_buf(), path: "p-memory.md".into() }));
+    }
+
+    #[test]
+    fn reload_keeps_an_open_memory_file_with_fresh_text() {
+        let (d, mut a) = memory_app();
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "m");
+        code(&mut a, KeyCode::Down);
+        code(&mut a, KeyCode::Right);
+        std::fs::write(d.path().join("memory/a.md"), "edited\n").unwrap();
+        let rows = std::mem::take(&mut a.rows);
+        a.reload(rows);
+        assert_eq!((a.view, a.memo.as_ref().unwrap().1.as_str()), (View::MemoryFile, "edited\n"));
+        std::fs::remove_file(d.path().join("memory/a.md")).unwrap();
+        let rows = std::mem::take(&mut a.rows);
+        a.reload(rows);
+        assert_eq!(a.view, View::Memory);
+    }
+
+    #[test]
+    fn capital_m_opens_memory_from_projects_and_sessions() {
+        let (_d, mut a) = memory_app(); // /p has memory, /q has none
+        press(&mut a, "jM");
+        assert!(a.status.contains("no auto-memory"));
+        assert_eq!(a.view, View::Projects);
+        press(&mut a, "kM");
+        assert_eq!(a.view, View::Memory);
+        press(&mut a, "S");
+        assert_eq!(a.view, View::Sessions);
+        press(&mut a, "M");
+        assert_eq!((a.view, a.rows[a.proj].cwd.clone()), (View::Memory, PathBuf::from("/p")));
+    }
+
+    #[test]
+    fn going_back_returns_to_the_project_we_opened() {
+        let mut a = app(); // alpha, beta, gamma
+        press(&mut a, "jj");
+        code(&mut a, KeyCode::Right);
+        code(&mut a, KeyCode::Left);
+        assert_eq!(a.cursor, 2);
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "s");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(cwds(&a)[a.cursor], "/c/gamma");
+        code(&mut a, KeyCode::Right);
+        press(&mut a, "ss"); // last used: gamma moves to the top
+        code(&mut a, KeyCode::Left);
+        assert_eq!(cwds(&a)[a.cursor], "/c/gamma", "found again after a re-sort");
+    }
+
+    #[test]
+    fn cursor_label_names_the_row_under_the_cursor() {
+        let mut a = app();
+        press(&mut a, "j");
+        assert_eq!(a.cursor_label().unwrap(), "2/3 › /b/beta");
+        code(&mut a, KeyCode::Right);
+        assert_eq!(a.cursor_label().unwrap(), "/b/beta › 1/2 b2 title b2");
+        press(&mut a, "/zzz");
+        assert_eq!(a.cursor_label().unwrap(), "/b/beta › no sessions");
+    }
+
+    #[test]
+    fn question_mark_in_the_menu_opens_help() {
+        let mut a = app();
+        code(&mut a, KeyCode::Enter);
+        press(&mut a, "?");
+        assert_eq!(a.mode, Mode::Help);
     }
 
     #[test]
