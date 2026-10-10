@@ -367,7 +367,7 @@ claude-sessions tui
 ```
 
 - Needs a terminal (stdin and stdout).
-- Lists every project (orphans in red; `MEM` counts memory files, and projects with only memory are listed too). `Enter` opens a menu for the directory: browse its sessions, browse its memory, open a shell there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
+- Lists every project (orphans in red; `MEM` counts memory files, and projects with only memory are listed too). `Enter` opens a menu for the directory: browse its sessions, browse its memory, open a shell or Claude Code there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
 - `--cd-file FILE`: where "quit and cd here" writes the chosen directory (default: print it to stdout after leaving the TUI).
 - `--claude-dir` and `--color` are honored.
 - Build with `--no-default-features` to leave the TUI (and its `ratatui` dependency) out.
@@ -379,7 +379,7 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | First / last |
 | `Space` | Tick and move on (page down when reading) |
 | `a` | Tick all / none |
-| `Enter` | Project: menu (`s` sessions, `m` memory, `h` shell here — `exit` returns to the list, `x` quit and cd here); session / memory list: read it |
+| `Enter` | Project: menu (`s` sessions, `m` memory, `h` shell here — `exit` returns to the list, `c` Claude Code here — exiting returns to the list, `x` quit and cd here); session / memory list: read it |
 | `→` | Open a project's sessions, or read a session |
 | `M` | Open the auto-memory of the project under the cursor (project list) or of the open project (Sessions view) |
 | `S` | Memory view: switch to the project's sessions |
@@ -404,7 +404,7 @@ claude-sessions tui
   cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
   ```
 
-- The shell opened with `h` has `CLAUDE_SESSIONS_TUI=1` set, so a prompt can show that you are inside the TUI.
+- The shell opened with `h` (and Claude Code opened with `c`) has `CLAUDE_SESSIONS_TUI=1` set, so a prompt can show that you are inside the TUI.
 - Delete refuses while Claude Code runs in an affected directory; with `--purge-config` on, while any Claude Code runs.
 
 ## Relation to `claude purge`

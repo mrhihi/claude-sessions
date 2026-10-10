@@ -53,6 +53,23 @@ fn spawn_shell(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Runs `claude` in `dir` and waits for it to exit. Through `cmd /C` on Windows, where
+/// `claude` may be a `.cmd` shim that `Command` cannot start directly.
+fn spawn_claude(dir: &Path) -> Result<()> {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "claude"]);
+        c
+    } else {
+        Command::new("claude")
+    };
+    cmd.current_dir(dir)
+        .env("CLAUDE_SESSIONS_TUI", "1")
+        .status()
+        .context("cannot start claude (is it on PATH?)")?;
+    Ok(())
+}
+
 /// Runs a command with the normal terminal, then comes back. `pause`: wait for Enter first
 /// (for commands whose output should be read).
 fn outside(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<()>, pause: bool) -> Result<String> {
@@ -88,6 +105,10 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, eff
         Effect::Shell(dir) => {
             let msg = outside(terminal, || spawn_shell(&dir), false)?;
             if msg == "Done" { format!("Back from the shell in {}", dir.display()) } else { msg }
+        }
+        Effect::Claude(dir) => {
+            let msg = outside(terminal, || spawn_claude(&dir), false)?;
+            if msg == "Done" { format!("Back from Claude in {}", dir.display()) } else { msg }
         }
         Effect::Reload => "Reloaded".to_string(),
         Effect::DeleteProjects(dirs) => {

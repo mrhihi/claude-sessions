@@ -86,6 +86,7 @@ fn help_lines(app: &App) -> (&'static str, Vec<(&'static str, &'static str)>) {
                 ("  s", "  browse sessions"),
                 ("  m", "  browse auto-memory"),
                 ("  h", "  shell here (exit returns)"),
+                ("  c", "  claude here (exit returns)"),
                 ("  x", "  quit and cd here"),
                 ("→", "open sessions"),
                 ("M", "open auto-memory"),
@@ -312,7 +313,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         Mode::Menu { row } => {
             let Some(p) = app.rows.get(*row) else { return };
-            let area = centered(f.area(), 64, 9);
+            let area = centered(f.area(), 64, 10);
             f.render_widget(Clear, area);
             let off = if p.orphan { Style::new().fg(Color::DarkGray) } else { Style::new() };
             let mem = if p.memory.is_empty() { "[m] Auto-memory (none)".to_string() } else { format!("[m] Auto-memory ({} file(s)): read, edit, delete", p.memory.len()) };
@@ -320,6 +321,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Line::from("[s] Browse sessions"),
                 Line::from(mem).style(if p.memory.is_empty() { Style::new().fg(Color::DarkGray) } else { Style::new() }),
                 Line::from("[h] Shell here (exit returns to this list)").style(off),
+                Line::from("[c] Claude here (exit returns to this list)").style(off),
                 Line::from("[x] Quit and cd here (see README: shell wrapper)").style(off),
                 Line::from(if p.orphan { "    directory no longer exists" } else { "" }).style(Style::new().fg(Color::Red)),
                 Line::from("Esc cancel").style(Style::new().fg(Color::DarkGray)),
@@ -397,7 +399,7 @@ mod tests {
         a.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let out = render(&a);
         assert!(out.contains("Help — Projects") && out.contains("orphans only") && out.contains("Space"), "{out}");
-        assert!(out.contains("shell here") && out.contains("browse auto-memory") && out.contains("quit and cd here"), "Enter menu keys are listed: {out}");
+        assert!(out.contains("shell here") && out.contains("claude here") && out.contains("browse auto-memory") && out.contains("quit and cd here"), "Enter menu keys are listed: {out}");
         a.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(!render(&a).contains("Help"));
     }
@@ -408,7 +410,7 @@ mod tests {
         let mut a = app();
         a.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let out = render(&a);
-        assert!(out.contains("[s] Browse sessions") && out.contains("[h] Shell here") && out.contains("[x] Quit and cd") && out.contains("no longer exists"), "{out}");
+        assert!(out.contains("[s] Browse sessions") && out.contains("[h] Shell here") && out.contains("[c] Claude here") && out.contains("[x] Quit and cd") && out.contains("no longer exists"), "{out}");
     }
 
     #[test]

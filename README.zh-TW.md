@@ -367,7 +367,7 @@ claude-sessions tui
 ```
 
 - 需要終端機（stdin 與 stdout）。
-- 列出所有專案（孤兒以紅色標示；`MEM` 欄為 memory 檔數，只有 memory 的專案也會列出），按 `Enter` 開啟該目錄的選單：查看 sessions、查看 memory、在該目錄開 shell、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
+- 列出所有專案（孤兒以紅色標示；`MEM` 欄為 memory 檔數，只有 memory 的專案也會列出），按 `Enter` 開啟該目錄的選單：查看 sessions、查看 memory、在該目錄開 shell 或 Claude Code、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
 - `--cd-file FILE`：「離開並 cd」把選到的目錄寫到這個檔案（預設在離開 TUI 後印到 stdout）。
 - 支援 `--claude-dir` 與 `--color`。
 - 以 `--no-default-features` 建置可不含 TUI（及其 `ratatui` 依賴）。
@@ -379,7 +379,7 @@ claude-sessions tui
 | `g` `G` / `Home` `End` | 第一列 / 最後一列 |
 | `Space` | 勾選並往下移（閱讀時為下一頁） |
 | `a` | 全選 / 全不選 |
-| `Enter` | 專案：選單（`s` 看 sessions、`m` 看 memory、`h` 在該目錄開 shell — `exit` 回到列表、`x` 離開並 cd）；session / memory 列表：閱讀 |
+| `Enter` | 專案：選單（`s` 看 sessions、`m` 看 memory、`h` 在該目錄開 shell — `exit` 回到列表、`c` 在該目錄開 Claude Code — 離開後回到列表、`x` 離開並 cd）；session / memory 列表：閱讀 |
 | `→` | 開啟專案的 sessions，或閱讀 session |
 | `M` | 開啟游標所在專案的 auto-memory（專案列表），或目前專案的 memory（Sessions 檢視） |
 | `S` | Memory 檢視：切到該專案的 sessions |
@@ -404,7 +404,7 @@ claude-sessions tui
   cs() { local f; f=$(mktemp) || return; claude-sessions tui --cd-file "$f"; [ -s "$f" ] && cd "$(cat "$f")"; rm -f "$f"; }
   ```
 
-- 用 `h` 開出的 shell 會帶有 `CLAUDE_SESSIONS_TUI=1`，可用來在提示字元標示目前在 TUI 之下。
+- 用 `h` 開出的 shell（以及用 `c` 開出的 Claude Code）會帶有 `CLAUDE_SESSIONS_TUI=1`，可用來在提示字元標示目前在 TUI 之下。
 - 若 Claude Code 正在受影響的目錄執行，刪除會被拒絕；開啟 `--purge-config` 時，只要有任何 Claude Code 在執行就會拒絕。
 
 ## 與 `claude purge` 的分工

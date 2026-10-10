@@ -93,6 +93,8 @@ pub enum Effect {
     Export { dir: PathBuf, id: String, path: String },
     /// Open a sub-shell in this directory; leaving it returns to the TUI.
     Shell(PathBuf),
+    /// Start Claude Code in this directory; leaving it returns to the TUI.
+    Claude(PathBuf),
     /// Open this memory file in the editor.
     EditMemory(PathBuf),
     /// Delete these memory files (by file name) of one project folder.
@@ -445,13 +447,17 @@ impl App {
                 self.open_memory(row);
             }
             KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('h') | KeyCode::Char('x') if orphan => {
+            KeyCode::Char('h') | KeyCode::Char('c') | KeyCode::Char('x') if orphan => {
                 self.mode = Mode::Normal;
                 self.status = format!("{} no longer exists", cwd.display());
             }
             KeyCode::Char('h') => {
                 self.mode = Mode::Normal;
                 return Some(Effect::Shell(cwd));
+            }
+            KeyCode::Char('c') => {
+                self.mode = Mode::Normal;
+                return Some(Effect::Claude(cwd));
             }
             KeyCode::Char('x') => {
                 self.mode = Mode::Normal;
@@ -731,6 +737,9 @@ mod tests {
         assert_eq!(press(&mut a, "h"), vec![Effect::Shell(PathBuf::from("/b/beta"))]);
         assert_eq!(a.mode, Mode::Normal);
         code(&mut a, KeyCode::Enter);
+        assert_eq!(press(&mut a, "c"), vec![Effect::Claude(PathBuf::from("/b/beta"))]);
+        assert_eq!(a.mode, Mode::Normal);
+        code(&mut a, KeyCode::Enter);
         assert_eq!(press(&mut a, "x"), vec![Effect::Cd(PathBuf::from("/b/beta"))]);
         code(&mut a, KeyCode::Enter);
         press(&mut a, "q"); // closes the menu, does not quit
@@ -747,6 +756,8 @@ mod tests {
         code(&mut a, KeyCode::Enter); // alpha is the orphan
         assert!(press(&mut a, "h").is_empty());
         assert!(a.status.contains("no longer exists"));
+        code(&mut a, KeyCode::Enter);
+        assert!(press(&mut a, "c").is_empty());
         code(&mut a, KeyCode::Enter);
         assert!(press(&mut a, "x").is_empty());
     }
