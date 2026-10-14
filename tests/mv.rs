@@ -233,7 +233,9 @@ fn memory_only(claude: &Path, cwd: &Path) -> PathBuf {
 #[test]
 fn mv_and_cp_carry_a_memory_only_project_folder() {
     let tmp = tempfile::tempdir().unwrap();
+    // Claude never records Windows' `\\?\` prefix, and it would change the encoded folder name.
     let root = tmp.path().canonicalize().unwrap();
+    let root = root.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map_or(root.clone(), PathBuf::from);
     let claude = root.join("claude");
     let (src, moved, copied) = (root.join("repo"), root.join("repo2"), root.join("repo3"));
     fs::create_dir_all(src.join(".git")).unwrap();
