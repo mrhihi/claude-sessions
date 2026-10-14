@@ -261,7 +261,7 @@ mod tests {
         let root = crate::scan::resolve(tmp.path()).unwrap();
         let claude = root.join(".claude");
         let (on_disk, in_json, in_history, unknown) =
-            (root.join("my proj.v2/sub"), root.join("gone a"), root.join("gone b"), root.join("gone c"));
+            (root.join("my proj.v2").join("sub"), root.join("gone a"), root.join("gone b"), root.join("gone c"));
         fs::create_dir_all(&on_disk).unwrap();
         for p in [&on_disk, &in_json, &in_history, &unknown] {
             let mem = claude.join("projects").join(encode_path(p)).join("memory");

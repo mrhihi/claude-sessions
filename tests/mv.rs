@@ -20,7 +20,7 @@ fn mv_carries_sessions_of_dir_and_subdirs() {
     let claude = root.join("claude");
     let src = root.join("my proj");
     let sub = src.join("sub.dir");
-    let dst = root.join("moved/new_name");
+    let dst = root.join("moved").join("new_name");
     fs::create_dir_all(&sub).unwrap();
     fs::write(sub.join("f.txt"), "x").unwrap();
     session(&claude, &src, "s1");
@@ -130,7 +130,7 @@ fn mv_makes_own_backups_and_running_it_backwards_restores_everything() {
     let tmp = tempfile::tempdir().unwrap();
     let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
-    let (a, sub, b) = (root.join("a dir"), root.join("a dir/sub"), root.join("b"));
+    let (a, sub, b) = (root.join("a dir"), root.join("a dir").join("sub"), root.join("b"));
     fs::create_dir_all(&sub).unwrap();
     fs::write(sub.join("f.txt"), "x").unwrap();
     session(&claude, &a, "s1");

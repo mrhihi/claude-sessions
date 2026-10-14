@@ -341,7 +341,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let root = crate::scan::resolve(t.path()).unwrap();
         let claude = root.join(".claude");
-        let (with_sessions, memory_only) = (root.join("p/a"), root.join("p/b"));
+        let (with_sessions, memory_only) = (root.join("p").join("a"), root.join("p").join("b"));
         std::fs::create_dir_all(&memory_only).unwrap();
         for (cwd, sessions) in [(&with_sessions, true), (&memory_only, false)] {
             let d = claude.join("projects").join(crate::encode::encode_path(cwd));
