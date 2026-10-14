@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn memory_is_counted_and_memory_only_projects_are_listed() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().canonicalize().unwrap();
+        let root = crate::encode::canonical_plain(t.path());
         let claude = root.join(".claude");
         let (with_sessions, memory_only) = (root.join("p/a"), root.join("p/b"));
         std::fs::create_dir_all(&memory_only).unwrap();

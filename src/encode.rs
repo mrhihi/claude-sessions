@@ -36,6 +36,17 @@ pub fn encode_path(p: &Path) -> String {
     format!("{}-{}", &slug[..MAX_LEN], short_hash(&full))
 }
 
+/// Test helper: `canonicalize` without Windows' `\\?\` prefix, which Claude never records
+/// (and which would change the encoded folder name).
+#[cfg(test)]
+pub fn canonical_plain(p: &Path) -> std::path::PathBuf {
+    let c = p.canonicalize().unwrap();
+    match c.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => rest.into(),
+        None => c,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

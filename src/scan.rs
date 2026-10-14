@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn memory_only_folders_are_listed_with_their_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = crate::encode::canonical_plain(tmp.path());
         let claude = root.join(".claude");
         let (on_disk, in_json, in_history, unknown) =
             (root.join("my proj.v2/sub"), root.join("gone a"), root.join("gone b"), root.join("gone c"));

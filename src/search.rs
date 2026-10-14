@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn memory_hits_respect_path_and_case() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = crate::encode::canonical_plain(tmp.path());
         let claude = root.join(".claude");
         for name in ["a", "b"] {
             let cwd = root.join(name);
