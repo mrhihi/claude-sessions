@@ -288,7 +288,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     match &app.mode {
         Mode::Confirm { question, effect } => {
-            let area = centered(f.area(), 70, 8);
+            let area = centered(f.area(), 70, 11);
             f.render_widget(Clear, area);
             let cfg = if app.purge_config { "ON  (history.jsonl lines + .claude.json entry are removed; backed up first)" } else { "off (prompt history and trust settings are kept)" };
             let extra = if matches!(effect, Effect::DeleteMemory { .. }) {
@@ -301,9 +301,15 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Line::from(""),
                 Line::from(extra),
                 Line::from(""),
-                Line::from("[y] delete   [n] cancel").style(Style::new().fg(Color::Yellow)),
+                Line::from("Press y to delete · n or Esc to cancel").style(Style::new().fg(Color::Yellow)),
             ];
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(Block::bordered().title(" Delete ").border_style(Style::new().fg(Color::Red))), area);
+        }
+        Mode::Notice(msg) => {
+            let area = centered(f.area(), 70, 8);
+            f.render_widget(Clear, area);
+            let text = vec![Line::from(msg.as_str()).style(Style::new().add_modifier(Modifier::BOLD)), Line::from(""), Line::from("Nothing was deleted. Press any key to continue.").style(Style::new().fg(Color::Yellow))];
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(Block::bordered().title(" Not done ").border_style(Style::new().fg(Color::Red))), area);
         }
         Mode::Input { label, text, .. } => {
             let area = centered(f.area(), 80, 5);

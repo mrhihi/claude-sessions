@@ -66,7 +66,7 @@ claude-sessions --all            # 這台電腦上 Claude Code 執行過的所�
 claude-sessions --since 7d       # 只看最近 7 天有活動的 session
 claude-sessions mv <來源> <目標>   # 搬移目錄並帶著 session
 claude-sessions memory           # 查看目前專案的 auto-memory
-claude-sessions tui              # 互動式瀏覽與管理 session
+claude-sessions tui [PATH]      # 互動式瀏覽與管理 session
 ```
 
 ## 指令參考
@@ -363,10 +363,11 @@ claude-sessions memory export -o memory.md
 ### tui
 
 ```sh
-claude-sessions tui
+claude-sessions tui [PATH]
 ```
 
 - 需要終端機（stdin 與 stdout）。
+- `PATH`：只顯示位於該目錄（含子目錄）的專案（預設：所有專案）。
 - 列出所有專案（孤兒以紅色標示；`MEM` 欄為 memory 檔數，只有 memory 的專案也會列出），按 `Enter` 開啟該目錄的選單：查看 sessions、查看 memory、在該目錄開 shell 或 Claude Code、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
 - `--cd-file FILE`：「離開並 cd」把選到的目錄寫到這個檔案（預設在離開 TUI 後印到 stdout）。
 - 支援 `--claude-dir` 與 `--color`。
@@ -445,6 +446,9 @@ claude-sessions tui
 cargo xtask version              # 目前版本、最新 tag、建議的下個版本
 cargo xtask release 0.2.0 -n     # 乾跑：執行所有檢查，不做任何變更
 cargo xtask release 0.2.0        # 更新 Cargo.toml、commit、建立 v0.2.0 tag 並推送
+cargo xtask publish              # 建置 release 執行檔（target/release）
+cargo xtask publish --install    # ...並安裝到 ~/.cargo/bin
+cargo xtask clean                # 清除建置產物（cargo clean）
 ```
 
 推送 tag 會觸發 `.github/workflows/release.yml`，建置 macOS Apple Silicon 與 Windows 執行檔並附加到 GitHub Release。加上 `-y` 可略過確認提示。

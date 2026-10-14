@@ -66,7 +66,7 @@ claude-sessions -s               # also list every session
 claude-sessions --since 7d       # only sessions active in the last 7 days
 claude-sessions mv <src> <dst>   # move a directory together with its sessions
 claude-sessions memory           # show this project's auto-memory
-claude-sessions tui              # browse and manage sessions interactively
+claude-sessions tui [PATH]      # browse and manage sessions interactively
 ```
 
 ## Command reference
@@ -363,10 +363,11 @@ claude-sessions memory export -o memory.md
 ### tui
 
 ```sh
-claude-sessions tui
+claude-sessions tui [PATH]
 ```
 
 - Needs a terminal (stdin and stdout).
+- `PATH`: only show projects at or under this directory (default: all projects).
 - Lists every project (orphans in red; `MEM` counts memory files, and projects with only memory are listed too). `Enter` opens a menu for the directory: browse its sessions, browse its memory, open a shell or Claude Code there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
 - `--cd-file FILE`: where "quit and cd here" writes the chosen directory (default: print it to stdout after leaving the TUI).
 - `--claude-dir` and `--color` are honored.
@@ -445,6 +446,9 @@ What a backup can bring back:
 cargo xtask version              # current version, latest tag, suggested next version
 cargo xtask release 0.2.0 -n     # dry run: run every check, change nothing
 cargo xtask release 0.2.0        # bump Cargo.toml, commit, tag v0.2.0 and push
+cargo xtask publish              # build the release binary (target/release)
+cargo xtask publish --install    # ...and install it into ~/.cargo/bin
+cargo xtask clean                # remove build artifacts (cargo clean)
 ```
 
 Pushing the tag triggers `.github/workflows/release.yml`, which builds the macOS Apple Silicon and Windows binaries and attaches them to the GitHub Release. Add `-y` to skip the confirmation prompt.

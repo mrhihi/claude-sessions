@@ -128,6 +128,8 @@ enum Cmd {
     /// Browse projects and sessions interactively: tick, delete, move, copy, export
     #[cfg(feature = "tui")]
     Tui {
+        /// Only show projects at or under this directory (default: all projects)
+        path: Option<PathBuf>,
         /// Write the directory chosen with "quit and cd here" to this file (for a shell wrapper); default: print it
         #[arg(long, value_name = "FILE")]
         cd_file: Option<PathBuf>,
@@ -338,7 +340,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Memory { path, all, json, cmd }) => run_memory(claude_dir, path, all, json, cmd),
         #[cfg(feature = "tui")]
-        Some(Cmd::Tui { cd_file }) => claude_sessions::tui::run(&claude_dir, cd_file.as_deref()),
+        Some(Cmd::Tui { path, cd_file }) => claude_sessions::tui::run(&claude_dir, path.as_deref(), cd_file.as_deref()),
         Some(Cmd::Doctor { fix: true, dry_run, yes, force, delete, .. }) => doctor::fix(&claude_dir, dry_run, yes, force, delete),
         Some(Cmd::Doctor { json, .. }) => {
             let d = doctor::diagnose(&claude_dir)?;

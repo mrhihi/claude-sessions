@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use crate::mv::{conflicts, running_claudes};
 use crate::{cp, export, memory, mv, rm, scan, stats};
-use app::{App, Effect, ProjectRow};
+use app::{App, Effect, Mode, ProjectRow};
 
 fn find<'a>(app: &'a App, dir: &Path) -> Option<&'a ProjectRow> {
     app.rows.iter().find(|r| r.dir == dir)
@@ -95,7 +95,7 @@ fn outside(terminal: &mut DefaultTerminal, f: impl FnOnce() -> Result<()>, pause
     Ok(msg)
 }
 
-fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, effect: Effect, chosen: &mut Option<PathBuf>) -> Result<bool> {
+fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, base: Option<&Path>, app: &mut App, effect: Effect, chosen: &mut Option<PathBuf>) -> Result<bool> {
     let status = match effect {
         Effect::Quit => return Ok(true),
         Effect::Cd(dir) => {
@@ -156,18 +156,22 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, app: &mut App, eff
             None => "Project not found".into(),
         },
     };
-    app.reload(app::load(claude_dir)?);
+    app.reload(app::load(claude_dir, base)?);
+    if status.starts_with("Refused") || status.starts_with("Delete failed") {
+        app.mode = Mode::Notice(status.clone());
+    }
     app.status = status;
     Ok(false)
 }
 
 /// Runs the TUI. If the user chose "quit and cd here", the directory is written to `cd_file`
 /// (for a shell wrapper) or printed to stdout.
-pub fn run(claude_dir: &Path, cd_file: Option<&Path>) -> Result<()> {
+pub fn run(claude_dir: &Path, path: Option<&Path>, cd_file: Option<&Path>) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("the TUI needs an interactive terminal");
     }
-    let mut app = App::new(app::load(claude_dir).context("cannot load sessions")?);
+    let base = path.map(crate::scan::resolve).transpose()?;
+    let mut app = App::new(app::load(claude_dir, base.as_deref()).context("cannot load sessions")?);
     let mut terminal = ratatui::init();
     let mut chosen = None;
     let result = (|| -> Result<()> {
@@ -178,7 +182,7 @@ pub fn run(claude_dir: &Path, cd_file: Option<&Path>) -> Result<()> {
                 continue;
             }
             if let Some(effect) = app.handle_key(key) {
-                if perform(&mut terminal, claude_dir, &mut app, effect, &mut chosen)? {
+                if perform(&mut terminal, claude_dir, base.as_deref(), &mut app, effect, &mut chosen)? {
                     return Ok(());
                 }
             }

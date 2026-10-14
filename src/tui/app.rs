@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::export::{Turn, load_turns};
 use crate::memory::{self, MemoryFile};
-use crate::scan::{list_all_projects, session_files};
+use crate::scan::{list_all_projects, session_files, strip_prefix_ci};
 use crate::stats::{SessionStat, analyze_session};
 
 pub struct ProjectRow {
@@ -32,9 +32,13 @@ impl ProjectRow {
     }
 }
 
-pub fn load(claude_dir: &Path) -> Result<Vec<ProjectRow>> {
+/// Loads every project, or only those whose directory is `base` or under it.
+pub fn load(claude_dir: &Path, base: Option<&Path>) -> Result<Vec<ProjectRow>> {
     let mut rows = Vec::new();
     for p in list_all_projects(claude_dir)? {
+        if base.is_some_and(|b| strip_prefix_ci(&p.cwd, b).is_none()) {
+            continue;
+        }
         let mut sessions: Vec<SessionStat> = session_files(&p.dir).iter().map(|f| analyze_session(f)).collect();
         sessions.sort_by(|a, b| b.last.cmp(&a.last));
         rows.push(ProjectRow {
@@ -121,6 +125,8 @@ pub enum Mode {
     Confirm { question: String, effect: Effect },
     Input { label: String, text: String, kind: InputKind },
     Help,
+    /// A message that must not be missed (a refused delete); any key dismisses it.
+    Notice(String),
     /// What to do with the directory of project `row` (index into `App::rows`).
     Menu { row: usize },
 }
@@ -377,6 +383,10 @@ impl App {
                     _ => {}
                 }
                 self.clamp();
+                None
+            }
+            Mode::Notice(_) => {
+                self.mode = Mode::Normal;
                 None
             }
             Mode::Confirm { effect, .. } => match key.code {
@@ -706,6 +716,27 @@ mod tests {
             sessions,
             memory: vec![],
         }
+    }
+
+    #[test]
+    fn load_filters_projects_by_base_path() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = t.path().join(".claude");
+        for (name, cwd) in [("-a-one", "/a/one"), ("-a-one-sub", "/a/one/sub"), ("-b-two", "/b/two")] {
+            let d = claude.join("projects").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let line = format!("{{\"type\":\"user\",\"cwd\":\"{cwd}\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n");
+            std::fs::write(d.join("s1.jsonl"), line).unwrap();
+        }
+        let cwds = |base: Option<&str>| {
+            let mut v: Vec<String> = load(&claude, base.map(Path::new)).unwrap().iter().map(|r| r.cwd.display().to_string()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(cwds(None).len(), 3);
+        assert_eq!(cwds(Some("/a")), ["/a/one", "/a/one/sub"]);
+        assert_eq!(cwds(Some("/a/one/sub")), ["/a/one/sub"]);
+        assert!(cwds(Some("/nonexistent")).is_empty());
     }
 
     fn app() -> App {

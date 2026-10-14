@@ -1,4 +1,4 @@
-//! Maintainer tasks: `cargo xtask version` and `cargo xtask release <version>`.
+//! Maintainer tasks: `cargo xtask version`, `release <version>`, `publish [--install]` and `clean`.
 
 use std::fs;
 use std::io::{self, Write};
@@ -33,12 +33,22 @@ enum Task {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Build the optimized binary into target/release; with --install also install it into ~/.cargo/bin.
+    Publish {
+        /// Install the binary with `cargo install --path . --locked --force`.
+        #[arg(short, long)]
+        install: bool,
+    },
+    /// Remove build artifacts (`cargo clean`).
+    Clean,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().task {
         Task::Version => show(),
         Task::Release { version, dry_run, yes } => release(&version, dry_run, yes),
+        Task::Publish { install } => publish(install),
+        Task::Clean => run_inherit("cargo", &["clean"]),
     }
 }
 
@@ -218,6 +228,16 @@ fn release(arg: &str, dry_run: bool, yes: bool) -> Result<()> {
     run("git", &["tag", "-a", &tag_name, "-m", &tag_name])?;
     run_inherit("git", &["push", "origin", "main", &tag_name])?;
     println!("Pushed {tag_name}. Watch the build: gh run watch  |  {REPO}/actions");
+    Ok(())
+}
+
+fn publish(install: bool) -> Result<()> {
+    run_inherit("cargo", &["build", "--release", "--locked", "--package", "claude-sessions"])?;
+    println!("Built {}", root().join("target/release/claude-sessions").display());
+    if install {
+        run_inherit("cargo", &["install", "--path", ".", "--locked", "--force"])?;
+        println!("Installed claude-sessions into cargo's bin directory");
+    }
     Ok(())
 }
 
