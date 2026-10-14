@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn dry_run_deletes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup(&crate::scan::resolve(tmp.path()).unwrap());
         run(&opts(claude.clone(), Some(alive), None, true)).unwrap();
         assert!(claude.join("projects/a/old.jsonl").exists());
     }
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn keep_memory_leaves_the_memory_folder_and_its_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, proj, _) = setup(&tmp.path().canonicalize().unwrap());
+        let (claude, proj, _) = setup(&crate::scan::resolve(tmp.path()).unwrap());
         let p = list_projects(&claude).unwrap().into_iter().find(|p| p.cwd == proj).unwrap();
         fs::create_dir_all(p.dir.join("memory")).unwrap();
         fs::write(p.dir.join("memory/MEMORY.md"), "- [a](a.md)\n").unwrap();
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn rm_older_than_keeps_recent_sessions() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup(&crate::scan::resolve(tmp.path()).unwrap());
         fs::create_dir_all(claude.join("projects/a/old")).unwrap();
         run(&opts(claude.clone(), Some(alive), Some(86_400), false)).unwrap();
         assert!(!claude.join("projects/a/old.jsonl").exists());
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn rm_without_age_removes_whole_folder() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup(&crate::scan::resolve(tmp.path()).unwrap());
         run(&opts(claude.clone(), Some(alive), None, false)).unwrap();
         assert!(!claude.join("projects/a").exists());
         assert!(claude.join("projects/b").exists());
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn clean_only_touches_orphans() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, _, _) = setup(&tmp.path().canonicalize().unwrap());
+        let (claude, _, _) = setup(&crate::scan::resolve(tmp.path()).unwrap());
         run(&opts(claude.clone(), None, None, false)).unwrap();
         assert!(claude.join("projects/a").exists());
         assert!(!claude.join("projects/b").exists());
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn rm_older_than_removes_that_sessions_side_data_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup_full(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup_full(&crate::scan::resolve(tmp.path()).unwrap());
         run(&opts(claude.clone(), Some(alive), Some(86_400), false)).unwrap();
         assert!(!claude.join("projects/a/old").exists());
         assert!(!claude.join("file-history/old").exists());
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn whole_folder_removal_takes_side_data_with_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup_full(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup_full(&crate::scan::resolve(tmp.path()).unwrap());
         run(&opts(claude.clone(), Some(alive), None, false)).unwrap();
         assert!(!claude.join("projects/a").exists());
         assert!(!claude.join("file-history/old").exists() && !claude.join("file-history/new").exists());
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn purge_config_edits_history_and_claude_json_with_backups() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, gone) = setup_full(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, gone) = setup_full(&crate::scan::resolve(tmp.path()).unwrap());
         let mut o = opts(claude.clone(), Some(alive.clone()), None, false);
         o.purge_config = true;
         run(&o).unwrap();
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn purge_config_keeps_project_entry_when_only_old_sessions_go() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup_full(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup_full(&crate::scan::resolve(tmp.path()).unwrap());
         let mut o = opts(claude.clone(), Some(alive.clone()), Some(86_400), false);
         o.purge_config = true;
         run(&o).unwrap();
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn purge_config_dry_run_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, alive, _) = setup_full(&tmp.path().canonicalize().unwrap());
+        let (claude, alive, _) = setup_full(&crate::scan::resolve(tmp.path()).unwrap());
         let before = fs::read_to_string(claude.join("history.jsonl")).unwrap();
         let mut o = opts(claude.clone(), Some(alive), None, true);
         o.purge_config = true;

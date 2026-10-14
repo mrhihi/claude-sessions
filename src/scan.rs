@@ -185,7 +185,7 @@ pub fn resolve(p: &Path) -> Result<PathBuf> {
     let mut cur = abs.as_path();
     loop {
         if let Ok(c) = cur.canonicalize() {
-            let mut out = c;
+            let mut out = strip_verbatim(c);
             out.extend(tail.iter().rev());
             return Ok(out);
         }
@@ -196,6 +196,19 @@ pub fn resolve(p: &Path) -> Result<PathBuf> {
             }
             _ => return Ok(abs),
         }
+    }
+}
+
+/// On Windows `canonicalize` returns `\\?\C:\dir` (or `\\?\UNC\srv\share`), but Claude records
+/// and encodes the plain `C:\dir`, and the two spellings never compare equal; undo the prefix.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else { return p };
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p,
     }
 }
 
@@ -245,7 +258,7 @@ mod tests {
     #[test]
     fn memory_only_folders_are_listed_with_their_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = crate::encode::canonical_plain(tmp.path());
+        let root = crate::scan::resolve(tmp.path()).unwrap();
         let claude = root.join(".claude");
         let (on_disk, in_json, in_history, unknown) =
             (root.join("my proj.v2/sub"), root.join("gone a"), root.join("gone b"), root.join("gone c"));

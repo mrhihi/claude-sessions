@@ -16,7 +16,7 @@ fn session(claude: &Path, cwd: &Path, id: &str) {
 #[test]
 fn mv_carries_sessions_of_dir_and_subdirs() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let src = root.join("my proj");
     let sub = src.join("sub.dir");
@@ -76,7 +76,7 @@ fn fake_claude(claude: &Path, pid: u32, cwd: &Path, proc_start: &str) {
 #[cfg(unix)] // detecting running claude processes relies on ps/pgrep
 fn mv_refuses_when_claude_runs_inside_unless_forced_or_stale() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let src = root.join("proj");
     let dst = root.join("proj2");
@@ -128,7 +128,7 @@ fn snapshot(claude: &Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn mv_makes_own_backups_and_running_it_backwards_restores_everything() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let (a, sub, b) = (root.join("a dir"), root.join("a dir/sub"), root.join("b"));
     fs::create_dir_all(&sub).unwrap();
@@ -158,7 +158,7 @@ fn mv_makes_own_backups_and_running_it_backwards_restores_everything() {
 #[test]
 fn mv_rewrites_every_directory_key_but_not_history_text() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let (src, dst) = (root.join("old"), root.join("new"));
     fs::create_dir_all(&src).unwrap();
@@ -194,7 +194,7 @@ fn mv_rewrites_every_directory_key_but_not_history_text() {
 #[test]
 fn mv_long_path_uses_claudes_truncated_hashed_folder_name() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let src = root.join("a".repeat(120)).join("b".repeat(120));
     let dst = root.join("c".repeat(120)).join("d".repeat(120));
@@ -208,7 +208,7 @@ fn mv_long_path_uses_claudes_truncated_hashed_folder_name() {
 #[test]
 fn resolve_dst_moves_into_existing_directory_like_mv() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let (src, parent) = (root.join("proj"), root.join("parent"));
     fs::create_dir_all(&src).unwrap();
     fs::create_dir_all(&parent).unwrap();
@@ -233,9 +233,7 @@ fn memory_only(claude: &Path, cwd: &Path) -> PathBuf {
 #[test]
 fn mv_and_cp_carry_a_memory_only_project_folder() {
     let tmp = tempfile::tempdir().unwrap();
-    // Claude never records Windows' `\\?\` prefix, and it would change the encoded folder name.
-    let root = tmp.path().canonicalize().unwrap();
-    let root = root.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map_or(root.clone(), PathBuf::from);
+    let root = claude_sessions::scan::resolve(tmp.path()).unwrap();
     let claude = root.join("claude");
     let (src, moved, copied) = (root.join("repo"), root.join("repo2"), root.join("repo3"));
     fs::create_dir_all(src.join(".git")).unwrap();

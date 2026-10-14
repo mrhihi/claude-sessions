@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn finds_hidden_leftovers_but_skips_recent_live_and_unrelated() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, _) = world(&tmp.path().canonicalize().unwrap());
+        let (claude, _) = world(&crate::scan::resolve(tmp.path()).unwrap());
         let d = diagnose(&claude).unwrap();
         let dangling: Vec<String> = d.dangling.iter().map(|x| x.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(dangling, vec![OLD_ID], "only the old one without a transcript: {dangling:?}");
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn fix_without_delete_leaves_every_file_in_place() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, _) = world(&tmp.path().canonicalize().unwrap());
+        let (claude, _) = world(&crate::scan::resolve(tmp.path()).unwrap());
         fix(&claude, false, true, true, false).unwrap();
         for p in ["projects/gone", "projects/empty", "projects/memonly", "file-history/11111111-1111-1111-1111-111111111111"] {
             assert!(claude.join(p).exists(), "{p} must survive --fix");
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn fix_delete_removes_files_for_good_and_spares_the_rest() {
         let tmp = tempfile::tempdir().unwrap();
-        let (claude, _) = world(&tmp.path().canonicalize().unwrap());
+        let (claude, _) = world(&crate::scan::resolve(tmp.path()).unwrap());
         fix(&claude, true, true, true, true).unwrap();
         assert!(claude.join("projects/gone").exists(), "dry run deletes nothing");
 

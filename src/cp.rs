@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn copies_dir_and_sessions_without_touching_originals() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
+        let root = crate::scan::resolve(tmp.path()).unwrap();
         let (src, sub, dst) = (root.join("a"), root.join("a/sub"), root.join("b"));
         fs::create_dir_all(&sub).unwrap();
         fs::write(src.join("f.txt"), "x").unwrap();
