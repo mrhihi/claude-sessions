@@ -8,6 +8,8 @@ mod ui;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
@@ -171,12 +173,50 @@ pub fn run(claude_dir: &Path, path: Option<&Path>, cd_file: Option<&Path>) -> Re
         bail!("the TUI needs an interactive terminal");
     }
     let base = path.map(crate::scan::resolve).transpose()?;
-    let mut app = App::new(app::load(claude_dir, base.as_deref()).context("cannot load sessions")?);
+    let mut loader = app::Loader::default();
+    let mut app = App::new(loader.load(claude_dir, base.as_deref()).context("cannot load sessions")?);
+    let (request_tx, request_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let refresh_dir = claude_dir.to_path_buf();
+    let refresh_base = base.clone();
+    // File parsing never blocks terminal input. At most one scan is in flight.
+    std::thread::spawn(move || {
+        while request_rx.recv().is_ok() {
+            let rows = loader.load(&refresh_dir, refresh_base.as_deref());
+            if result_tx.send(rows).is_err() {
+                break;
+            }
+        }
+    });
+    let mut next_refresh = Instant::now() + Duration::from_secs(1);
+    let mut refreshing = false;
+    let mut discard_refresh = false;
     let mut terminal = ratatui::init();
     let mut chosen = None;
     let result = (|| -> Result<()> {
         loop {
+            // Keep modal targets stable until the user finishes the operation.
+            if matches!(app.mode, Mode::Normal | Mode::Filter | Mode::Help) {
+                if let Ok(result) = result_rx.try_recv() {
+                    refreshing = false;
+                    next_refresh = Instant::now() + Duration::from_secs(1);
+                    if !discard_refresh {
+                        match result {
+                            Ok(rows) => app.refresh(rows),
+                            Err(e) => app.status = format!("Auto-refresh failed: {e:#}"),
+                        }
+                    }
+                    discard_refresh = false;
+                }
+                if !refreshing && Instant::now() >= next_refresh {
+                    refreshing = request_tx.send(()).is_ok();
+                    next_refresh = Instant::now() + Duration::from_secs(1);
+                }
+            }
             terminal.draw(|f| ui::draw(f, &app))?;
+            if !event::poll(Duration::from_millis(100))? {
+                continue;
+            }
             let Event::Key(key) = event::read()? else { continue };
             if key.kind != KeyEventKind::Press {
                 continue;
@@ -185,6 +225,9 @@ pub fn run(claude_dir: &Path, path: Option<&Path>, cd_file: Option<&Path>) -> Re
                 if perform(&mut terminal, claude_dir, base.as_deref(), &mut app, effect, &mut chosen)? {
                     return Ok(());
                 }
+                // Discard a snapshot started before a management operation.
+                discard_refresh = refreshing;
+                next_refresh = Instant::now() + Duration::from_secs(1);
             }
         }
     })();

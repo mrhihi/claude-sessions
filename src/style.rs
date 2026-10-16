@@ -10,6 +10,10 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
 /// Colors for a terminal stdout, unless `NO_COLOR` is set or `TERM=dumb`.
 pub fn auto() -> bool {
     std::io::stdout().is_terminal()

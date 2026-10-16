@@ -367,6 +367,8 @@ claude-sessions tui [PATH]
 ```
 
 - 需要終端機（stdin 與 stdout）。
+- TUI 時間依系統本地時區顯示。各清單分別記住排序；原本順序為專案最近使用優先、session 由新到舊、memory 索引檔優先。
+- 每秒在背景更新 session 數、訊息數、大小、最後使用時間與 memory 檔數；保留游標、勾選與閱讀位置。選單、輸入及確認視窗開啟時暫緩更新；`r` 仍可手動重新載入。
 - `PATH`：只顯示位於該目錄（含子目錄）的專案（預設：所有專案）。
 - 列出所有專案（孤兒以紅色標示；`MEM` 欄為 memory 檔數，只有 memory 的專案也會列出），按 `Enter` 開啟該目錄的選單：查看 sessions、查看 memory、在該目錄開 shell 或 Claude Code、或離開並 `cd` 過去。`→` 直接進入 sessions；session 可開啟閱讀。
 - `--cd-file FILE`：「離開並 cd」把選到的目錄寫到這個檔案（預設在離開 TUI 後印到 stdout）。
@@ -387,7 +389,7 @@ claude-sessions tui [PATH]
 | `Esc` / `←` | 返回（最上層的 `Esc` 先清除過濾，再按則離開；`←` 不會離開） |
 | `/` | 過濾（`Enter` 確認，`Esc` 清除） |
 | `o` | 只看孤兒 |
-| `s` | 切換排序：path、size、last used |
+| `s` | 開啟目前清單的排序選單：↑↓ 選欄位；`a` 升冪、`d` 降冪、`o` 原本順序；Enter 套用、Esc 取消 |
 | `d` | 刪除已勾選的列（沒勾選就是游標所在列）；`y` 確認，`n` / `Esc` 取消，`p` 切換 `--purge-config` |
 | `m` / `c` | 搬移 / 複製專案目錄（詢問目標路徑，執行 `mv` / `cp` 後等待 `Enter`） |
 | `e` | Sessions 檢視：把 session 匯出成 Markdown（預設檔名 `<id>.md`）；Memory 檢視或閱讀 memory 時：用 `$EDITOR` 編輯該檔 |

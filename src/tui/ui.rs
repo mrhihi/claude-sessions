@@ -3,10 +3,50 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use super::app::{App, Effect, Mode, View};
+use super::app::{App, Effect, Mode, SortOrder, View};
 use crate::export::Turn;
+
+// A shared dark palette keeps numbers, navigation and dialogs consistent.
+const BACKGROUND: Color = Color::Rgb(20, 24, 36);
+const PANEL: Color = Color::Rgb(28, 34, 49);
+const SELECTED: Color = Color::Rgb(47, 62, 86);
+const TEXT: Color = Color::Rgb(220, 227, 240);
+const MUTED: Color = Color::Rgb(145, 160, 183);
+const CYAN: Color = Color::Rgb(110, 211, 226);
+const GREEN: Color = Color::Rgb(158, 218, 165);
+const YELLOW: Color = Color::Rgb(240, 205, 133);
+const PURPLE: Color = Color::Rgb(192, 169, 240);
+const RED: Color = Color::Rgb(244, 143, 154);
+
+fn ink(color: Color) -> Style {
+    if crate::style::enabled() { Style::new().fg(color) } else { Style::new() }
+}
+
+fn surface(fg: Color, bg: Color) -> Style {
+    if crate::style::enabled() { ink(fg).bg(bg) } else { Style::new() }
+}
+
+fn cell(text: impl Into<String>, color: Color) -> Cell<'static> {
+    Cell::from(text.into()).style(ink(color))
+}
+
+fn number(text: impl Into<String>, color: Color) -> Cell<'static> {
+    Cell::from(Line::from(text.into()).right_aligned()).style(ink(color))
+}
+
+fn marker(checked: bool) -> Cell<'static> {
+    cell(if checked { "[x]" } else { "[ ]" }, if checked { GREEN } else { MUTED })
+}
+
+fn stripe(index: usize) -> Style {
+    surface(TEXT, if index % 2 == 0 { BACKGROUND } else { PANEL })
+}
+
+fn dialog(title: String, accent: Color) -> Block<'static> {
+    Block::bordered().title(title).style(surface(TEXT, PANEL)).border_style(ink(accent)).title_style(ink(accent).bold())
+}
 
 /// Wrap `text` to `width` display columns (CJK counts double), keeping explicit newlines.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -32,7 +72,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 fn session_lines(turns: &[Turn], width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for t in turns {
-        let color = if t.role == "user" { Color::Cyan } else { Color::Green };
+        let color = if t.role == "user" { CYAN } else { GREEN };
         let mut head = (if t.role == "user" { "User" } else { "Assistant" }).to_string();
         if let Some(ts) = &t.timestamp {
             head.push_str(&format!(" · {}", when(&Some(ts.clone()))));
@@ -40,7 +80,7 @@ fn session_lines(turns: &[Turn], width: usize) -> Vec<Line<'static>> {
         if let Some(m) = &t.model {
             head.push_str(&format!(" · {m}"));
         }
-        lines.push(Line::styled(head, Style::new().fg(color).add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(head, ink(color).add_modifier(Modifier::BOLD)));
         lines.extend(wrap(&t.text, width).into_iter().map(Line::from));
         lines.push(Line::from(""));
     }
@@ -52,7 +92,18 @@ fn mb(bytes: u64) -> String {
 }
 
 fn when(t: &Option<String>) -> String {
-    t.as_deref().map(|s| s.chars().take(16).collect::<String>().replace('T', " ")).unwrap_or_else(|| "-".into())
+    t.as_deref().map(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|_| s.chars().take(16).collect::<String>().replace('T', " "))
+    }).unwrap_or_else(|| "-".into())
+}
+
+fn directory_label(path: &std::path::Path) -> String {
+    match path.file_name() {
+        Some(name) => format!("… {}", name.to_string_lossy()),
+        None => path.display().to_string(),
+    }
 }
 
 /// Cuts `s` from the left to at most `w` cells, so its end (the current row) stays visible.
@@ -93,7 +144,7 @@ fn help_lines(app: &App) -> (&'static str, Vec<(&'static str, &'static str)>) {
                 ("d", "delete ticked (or cursor) folders; p: purge config"),
                 ("m / c", "move / copy the directory + sessions"),
                 ("o", "orphans only"),
-                ("s", "cycle sort (path, size, last used)"),
+                ("s", "sort by column (ascending / descending / original)"),
                 ("r", "reload"),
                 ("Esc", "clear filter, then quit"),
             ]);
@@ -103,6 +154,7 @@ fn help_lines(app: &App) -> (&'static str, Vec<(&'static str, &'static str)>) {
             let mut v = list.to_vec();
             v.extend([
                 ("Enter / →", "read the session"),
+                ("s", "sort by column (ascending / descending / original)"),
                 ("d", "delete ticked (or cursor) sessions; p: purge config"),
                 ("e", "export the session as Markdown"),
                 ("M", "this project's auto-memory"),
@@ -115,6 +167,7 @@ fn help_lines(app: &App) -> (&'static str, Vec<(&'static str, &'static str)>) {
             let mut v = list.to_vec();
             v.extend([
                 ("Enter / →", "read the file"),
+                ("s", "sort by column (ascending / descending / original)"),
                 ("e", "edit in $EDITOR"),
                 ("d", "delete ticked (or cursor) files + their MEMORY.md lines"),
                 ("x", "export all memory as Markdown"),
@@ -146,6 +199,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    f.render_widget(Block::new().style(surface(TEXT, BACKGROUND)), f.area());
     let [head, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
 
     let place = match app.view {
@@ -163,98 +217,99 @@ pub fn draw(f: &mut Frame, app: &App) {
             app.rows.get(app.proj).map(|p| format!("{} › memory › {file}", p.cwd.display())).unwrap_or_default()
         }
     };
-    let sort = format!("  sort: {}", app.sort.label());
+    let sort = format!("  sort: {}", app.sort_label());
     // Leave room for the name and sort; the path is cut from the left so the current row stays visible.
     let room = (head.width as usize).saturating_sub(" claude-sessions ".len() + sort.len() + 12);
     let mut title = vec![
-        Span::styled(" claude-sessions ", Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan)),
+        Span::styled(" claude-sessions ", ink(CYAN).bold()),
         Span::raw(tail(&place, room)),
-        Span::styled(sort, Style::new().fg(Color::DarkGray)),
+        Span::styled(sort, ink(MUTED)),
     ];
     if app.only_orphans {
-        title.push(Span::styled("  [orphans only]", Style::new().fg(Color::Yellow)));
+        title.push(Span::styled("  [orphans only]", ink(YELLOW)));
     }
     if !app.filter.is_empty() || app.mode == Mode::Filter {
-        title.push(Span::styled(format!("  /{}", app.filter), Style::new().fg(Color::Green)));
+        title.push(Span::styled(format!("  /{}", app.filter), ink(GREEN)));
     }
     if !app.selected.is_empty() {
-        title.push(Span::styled(format!("  {} ticked", app.selected.len()), Style::new().fg(Color::Magenta)));
+        title.push(Span::styled(format!("  {} ticked", app.selected.len()), ink(PURPLE)));
     }
-    f.render_widget(Paragraph::new(Line::from(title)), head);
+    f.render_widget(Paragraph::new(Line::from(title)).style(surface(TEXT, PANEL)), head);
 
     let mut state = TableState::default();
-    let hl = Style::new().add_modifier(Modifier::REVERSED);
+    let hl = if crate::style::enabled() { Style::new().bg(SELECTED).bold() } else { Style::new().add_modifier(Modifier::REVERSED) };
     match app.view {
         View::Projects => {
             let vis = app.visible_projects();
             let rows: Vec<Row> = vis
                 .iter()
-                .map(|i| {
+                .enumerate()
+                .map(|(index, i)| {
                     let r = &app.rows[*i];
-                    let mark = if app.is_ticked(&r.key()) { "[x]" } else { "[ ]" };
-                    let style = if r.orphan { Style::new().fg(Color::Red) } else { Style::new() };
                     Row::new(vec![
-                        mark.to_string(),
-                        if r.orphan { "gone".into() } else { String::new() },
-                        r.cwd.display().to_string(),
-                        r.sessions.len().to_string(),
-                        if r.memory.is_empty() { "-".into() } else { r.memory.len().to_string() },
-                        r.messages.to_string(),
-                        mb(r.bytes),
-                        when(&r.last),
+                        marker(app.is_ticked(&r.key())),
+                        cell(if r.orphan { "gone" } else { "" }, RED),
+                        cell(directory_label(&r.cwd), if r.orphan { RED } else { TEXT }),
+                        number(r.sessions.len().to_string(), CYAN),
+                        number(if r.memory.is_empty() { "-".into() } else { r.memory.len().to_string() }, PURPLE),
+                        number(r.messages.to_string(), GREEN),
+                        number(mb(r.bytes), YELLOW),
+                        cell(when(&r.last), MUTED),
                     ])
-                    .style(style)
+                    .style(stripe(index))
                 })
                 .collect();
             let widths = [Constraint::Length(3), Constraint::Length(4), Constraint::Fill(1), Constraint::Length(8), Constraint::Length(4), Constraint::Length(7), Constraint::Length(9), Constraint::Length(16)];
-            let header = Row::new(["", "", "DIRECTORY", "SESSIONS", "MEM", "MSGS", "SIZE", "LAST (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
+            let header = Row::new([Cell::from(""), Cell::from(""), Cell::from("DIRECTORY"), Cell::from(Line::from("SESSIONS").right_aligned()), Cell::from(Line::from("MEM").right_aligned()), Cell::from(Line::from("MSGS").right_aligned()), Cell::from(Line::from("SIZE").right_aligned()), Cell::from("LAST (local)")]).style(surface(CYAN, PANEL).bold());
             state.select((!vis.is_empty()).then_some(app.cursor));
-            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
+            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP).border_style(ink(MUTED))), body, &mut state);
         }
         View::Sessions => {
             let vis = app.visible_sessions();
             let p = &app.rows[app.proj.min(app.rows.len().saturating_sub(1))];
             let rows: Vec<Row> = vis
                 .iter()
-                .map(|i| {
+                .enumerate()
+                .map(|(index, i)| {
                     let s = &p.sessions[*i];
                     Row::new(vec![
-                        if app.is_ticked(&s.id) { "[x]".to_string() } else { "[ ]".to_string() },
-                        s.id.chars().take(8).collect(),
-                        s.title.clone().unwrap_or_else(|| "(untitled)".into()),
-                        s.messages.to_string(),
-                        mb(s.bytes),
-                        when(&s.last),
-                    ])
+                        marker(app.is_ticked(&s.id)),
+                        cell(s.id.chars().take(8).collect::<String>(), PURPLE),
+                        cell(s.title.clone().unwrap_or_else(|| "(untitled)".into()), if s.title.is_some() { TEXT } else { MUTED }),
+                        number(s.messages.to_string(), GREEN),
+                        number(mb(s.bytes), YELLOW),
+                        cell(when(&s.last), MUTED),
+                    ]).style(stripe(index))
                 })
                 .collect();
             let widths = [Constraint::Length(3), Constraint::Length(8), Constraint::Fill(1), Constraint::Length(6), Constraint::Length(9), Constraint::Length(16)];
-            let header = Row::new(["", "ID", "TITLE", "MSGS", "SIZE", "LAST (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
+            let header = Row::new([Cell::from(""), Cell::from("ID"), Cell::from("TITLE"), Cell::from(Line::from("MSGS").right_aligned()), Cell::from(Line::from("SIZE").right_aligned()), Cell::from("LAST (local)")]).style(surface(CYAN, PANEL).bold());
             state.select((!vis.is_empty()).then_some(app.cursor));
-            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
+            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP).border_style(ink(MUTED))), body, &mut state);
         }
         View::Memory => {
             let vis = app.visible_memory();
             let p = &app.rows[app.proj.min(app.rows.len().saturating_sub(1))];
             let rows: Vec<Row> = vis
                 .iter()
-                .map(|i| {
+                .enumerate()
+                .map(|(index, i)| {
                     let m = &p.memory[*i];
                     let kind = if m.is_index() { "index".to_string() } else { m.kind.clone().unwrap_or_default() };
                     Row::new(vec![
-                        if app.is_ticked(&m.file) { "[x]".to_string() } else { "[ ]".to_string() },
-                        m.file.clone(),
-                        kind,
-                        m.summary(),
-                        format!("{:.1} KB", m.bytes as f64 / 1024.0),
-                        when(&m.modified),
-                    ])
+                        marker(app.is_ticked(&m.file)),
+                        cell(m.file.clone(), CYAN),
+                        cell(kind, PURPLE),
+                        cell(m.summary(), TEXT),
+                        number(format!("{:.1} KB", m.bytes as f64 / 1024.0), YELLOW),
+                        cell(when(&m.modified), MUTED),
+                    ]).style(stripe(index))
                 })
                 .collect();
             let widths = [Constraint::Length(3), Constraint::Length(32), Constraint::Length(9), Constraint::Fill(1), Constraint::Length(8), Constraint::Length(16)];
-            let header = Row::new(["", "FILE", "TYPE", "DESCRIPTION", "SIZE", "MODIFIED (UTC)"]).style(Style::new().add_modifier(Modifier::BOLD));
+            let header = Row::new([Cell::from(""), Cell::from("FILE"), Cell::from("TYPE"), Cell::from("DESCRIPTION"), Cell::from(Line::from("SIZE").right_aligned()), Cell::from("MODIFIED (local)")]).style(surface(CYAN, PANEL).bold());
             state.select((!vis.is_empty()).then_some(app.cursor));
-            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP)), body, &mut state);
+            f.render_stateful_widget(Table::new(rows, widths).header(header).row_highlight_style(hl).block(Block::new().borders(Borders::TOP).border_style(ink(MUTED))), body, &mut state);
         }
         View::Session | View::MemoryFile => {}
     }
@@ -269,22 +324,40 @@ pub fn draw(f: &mut Frame, app: &App) {
         app.view_dims.set((h, lines.len()));
         let scroll = app.scroll.min(lines.len().saturating_sub(h));
         let title = if lines.is_empty() { " (no messages) ".to_string() } else { format!(" {}–{} / {} ", scroll + 1, (scroll + h).min(lines.len()), lines.len()) };
-        f.render_widget(Block::new().borders(Borders::TOP).title(title), body);
+        f.render_widget(Block::new().borders(Borders::TOP).border_style(ink(MUTED)).title(title), body);
         f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
     } else if app.len() == 0 {
-        f.render_widget(Paragraph::new("  (nothing to show)").style(Style::new().fg(Color::DarkGray)), Rect { y: body.y + 2, height: 1, ..body });
+        f.render_widget(Paragraph::new("  (nothing to show)").style(ink(MUTED)), Rect { y: body.y + 2, height: 1, ..body });
     }
 
     let hint = match (&app.mode, app.view) {
         (Mode::Filter, _) => " type to filter · Enter keep · Esc clear".to_string(),
         (_, View::Projects) => " ↑↓ move · Space tick · Enter menu · → sessions · M memory · d delete · m move · c copy · / filter · o orphans · s sort · ? help · q quit".to_string(),
-        (_, View::Sessions) => " ↑↓ move · Space tick · a all · d delete · e export · M memory · / filter · Enter/→ read · Esc/← back · ? help · q quit".to_string(),
+        (_, View::Sessions) => " ↑↓ move · Space tick · a all · s sort · d delete · e export · M memory · / filter · Enter/→ read · Esc/← back · ? help · q quit".to_string(),
         (_, View::Session) => " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · Esc/← back · ? help · q quit".to_string(),
-        (_, View::Memory) => " ↑↓ move · Space tick · Enter/→ read · e edit · d delete · x export · S sessions · / filter · Esc/← back · ? help · q quit".to_string(),
+        (_, View::Memory) => " ↑↓ move · Space tick · Enter/→ read · e edit · s sort · d delete · x export · S sessions · / filter · Esc/← back · ? help · q quit".to_string(),
         (_, View::MemoryFile) => " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · e edit · Esc/← back · ? help · q quit".to_string(),
     };
-    let foot_text = if app.status.is_empty() { Span::styled(hint, Style::new().fg(Color::DarkGray)) } else { Span::styled(format!(" {}", app.status), Style::new().fg(Color::Yellow)) };
-    f.render_widget(Paragraph::new(Line::from(foot_text)), foot);
+    let foot_text = if app.status.is_empty() {
+        let mut spans = vec![Span::raw(" ")];
+        for (i, action) in hint.split('·').enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", ink(MUTED)));
+            }
+            let (key, description) = action.trim().split_once(' ').unwrap_or((action.trim(), ""));
+            spans.push(Span::styled(key.to_string(), ink(CYAN).bold()));
+            spans.push(Span::styled(format!(" {description}"), ink(MUTED)));
+        }
+        Line::from(spans)
+    } else {
+        let color = if ["Refused", "Failed", "Delete failed", "Export failed", "Auto-refresh failed"].iter().any(|prefix| app.status.starts_with(prefix)) {
+            RED
+        } else {
+            GREEN
+        };
+        Line::from(Span::styled(format!(" {}", app.status), ink(color)))
+    };
+    f.render_widget(Paragraph::new(foot_text).style(surface(TEXT, PANEL)), foot);
 
     match &app.mode {
         Mode::Confirm { question, effect } => {
@@ -301,54 +374,75 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Line::from(""),
                 Line::from(extra),
                 Line::from(""),
-                Line::from("Press y to delete · n or Esc to cancel").style(Style::new().fg(Color::Yellow)),
+                Line::from("Press y to delete · n or Esc to cancel").style(ink(YELLOW)),
             ];
-            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(Block::bordered().title(" Delete ").border_style(Style::new().fg(Color::Red))), area);
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(dialog(" Delete ".into(), RED)), area);
         }
         Mode::Notice(msg) => {
             let area = centered(f.area(), 70, 8);
             f.render_widget(Clear, area);
-            let text = vec![Line::from(msg.as_str()).style(Style::new().add_modifier(Modifier::BOLD)), Line::from(""), Line::from("Nothing was deleted. Press any key to continue.").style(Style::new().fg(Color::Yellow))];
-            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(Block::bordered().title(" Not done ").border_style(Style::new().fg(Color::Red))), area);
+            let text = vec![Line::from(msg.as_str()).style(Style::new().add_modifier(Modifier::BOLD)), Line::from(""), Line::from("Nothing was deleted. Press any key to continue.").style(ink(YELLOW))];
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(dialog(" Not done ".into(), RED)), area);
         }
         Mode::Input { label, text, .. } => {
             let area = centered(f.area(), 80, 5);
             f.render_widget(Clear, area);
-            let lines = vec![Line::from(format!("{text}▏")), Line::from(""), Line::from("Enter confirm · Esc cancel").style(Style::new().fg(Color::DarkGray))];
-            f.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!(" {label} "))), area);
+            let lines = vec![Line::from(format!("{text}▏")), Line::from(""), Line::from("Enter confirm · Esc cancel").style(ink(MUTED))];
+            f.render_widget(Paragraph::new(lines).block(dialog(format!(" {label} "), CYAN)), area);
         }
         Mode::Menu { row } => {
             let Some(p) = app.rows.get(*row) else { return };
-            let area = centered(f.area(), 64, 10);
+            let area = centered(f.area(), 64, 11);
             f.render_widget(Clear, area);
-            let off = if p.orphan { Style::new().fg(Color::DarkGray) } else { Style::new() };
+            let off = if p.orphan { ink(MUTED) } else { ink(GREEN) };
             let mem = if p.memory.is_empty() { "[m] Auto-memory (none)".to_string() } else { format!("[m] Auto-memory ({} file(s)): read, edit, delete", p.memory.len()) };
             let text = vec![
-                Line::from("[s] Browse sessions"),
-                Line::from(mem).style(if p.memory.is_empty() { Style::new().fg(Color::DarkGray) } else { Style::new() }),
+                Line::from("[s] Browse sessions").style(ink(CYAN)),
+                Line::from("[o] Sort projects").style(ink(YELLOW)),
+                Line::from(mem).style(if p.memory.is_empty() { ink(MUTED) } else { ink(PURPLE) }),
                 Line::from("[h] Shell here (exit returns to this list)").style(off),
                 Line::from("[c] Claude here (exit returns to this list)").style(off),
                 Line::from("[x] Quit and cd here (see README: shell wrapper)").style(off),
-                Line::from(if p.orphan { "    directory no longer exists" } else { "" }).style(Style::new().fg(Color::Red)),
-                Line::from("Esc cancel").style(Style::new().fg(Color::DarkGray)),
+                Line::from(if p.orphan { "    directory no longer exists" } else { "" }).style(ink(RED)),
+                Line::from("Esc cancel").style(ink(MUTED)),
             ];
-            f.render_widget(Paragraph::new(text).block(Block::bordered().title(format!(" {} ", p.cwd.display()))), area);
+            f.render_widget(Paragraph::new(text).block(dialog(format!(" {} ", directory_label(&p.cwd)), CYAN)), area);
+        }
+        Mode::SortMenu { cursor, order } => {
+            let mut lines = vec![Line::from("Choose a column").style(ink(MUTED))];
+            for (i, field) in app.sort_columns().iter().enumerate() {
+                let style = if i == *cursor {
+                    if crate::style::enabled() { surface(CYAN, SELECTED).bold() } else { Style::new().add_modifier(Modifier::REVERSED) }
+                } else { ink(TEXT) };
+                lines.push(Line::styled(format!(" {} {}", if i == *cursor { "›" } else { " " }, field.label()), style));
+            }
+            lines.push(Line::from(""));
+            let mut directions = Vec::new();
+            for (key, value) in [("a", SortOrder::Ascending), ("d", SortOrder::Descending), ("o", SortOrder::Original)] {
+                directions.push(Span::styled(format!(" [{key}] {} ", value.label()), if order == &value { ink(GREEN).bold().underlined() } else { ink(MUTED) }));
+            }
+            lines.push(Line::from(directions));
+            lines.push(Line::from("Original restores this list's default order.").style(ink(MUTED)));
+            lines.push(Line::from("↑↓ column · ←→ order · Enter apply · Esc cancel").style(ink(CYAN)));
+            let area = centered(f.area(), 58, lines.len() as u16 + 2);
+            f.render_widget(Clear, area);
+            f.render_widget(Paragraph::new(lines).block(dialog(" Sort ".into(), CYAN)), area);
         }
         Mode::Help => {
             let (name, keys) = help_lines(app);
             let kw = keys.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
             let mut lines: Vec<Line> = keys
                 .iter()
-                .map(|(k, d)| Line::from(vec![Span::styled(format!("{k:<kw$}  "), Style::new().fg(Color::Cyan)), Span::raw(*d)]))
+                .map(|(k, d)| Line::from(vec![Span::styled(format!("{k:<kw$}  "), ink(CYAN)), Span::raw(*d)]))
                 .collect();
             if matches!(app.view, View::Projects | View::Sessions | View::Memory) {
                 lines.push(Line::from(""));
-                lines.push(Line::from("Deleting is refused while Claude Code runs in that directory.").style(Style::new().fg(Color::DarkGray)));
+                lines.push(Line::from("Deleting is refused while Claude Code runs in that directory.").style(ink(MUTED)));
             }
             let w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4;
             let area = centered(f.area(), w.max(40), lines.len() as u16 + 2);
             f.render_widget(Clear, area);
-            f.render_widget(Paragraph::new(lines).block(Block::bordered().title(format!(" Help — {name} — any key closes "))), area);
+            f.render_widget(Paragraph::new(lines).block(dialog(format!(" Help — {name} — any key closes "), PURPLE)), area);
         }
         _ => {}
     }
@@ -387,7 +481,7 @@ mod tests {
     #[test]
     fn project_list_shows_orphan_and_numbers() {
         let out = render(&app());
-        assert!(out.contains("/x/project") && out.contains("gone") && out.contains("2.0 MB") && out.contains("2026-01-02 03:04"), "{out}");
+        assert!(out.contains("/x/project") && out.contains("gone") && out.contains("2.0 MB") && out.contains(&when(&Some("2026-01-02T03:04:05Z".into()))), "{out}");
     }
 
     #[test]
@@ -429,7 +523,7 @@ mod tests {
             Turn { role: "assistant", timestamp: None, model: None, text: "你好，我很好".into() },
         ];
         let out = render(&a);
-        assert!(out.contains("User · 2026-01-02 03:04") && out.contains("how are you") && out.contains("Assistant") && out.contains('你') && out.contains('很'), "{out}");
+        assert!(out.contains(&format!("User · {}", when(&Some("2026-01-02T03:04:05Z".into())))) && out.contains("how are you") && out.contains("Assistant") && out.contains('你') && out.contains('很'), "{out}");
         a.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(a.view, View::Sessions);
     }
@@ -488,7 +582,7 @@ mod tests {
         let mut a = app();
         a.rows[0].cwd = format!("/very/{}/deep/project-name", "long-segment/".repeat(12)).into();
         let top = render(&a).lines().next().unwrap().to_string();
-        assert!(top.contains("…") && top.contains("deep/project-name") && top.contains("sort: path"), "{top}");
+        assert!(top.contains("…") && top.contains("deep/project-name") && top.contains("sort: last used"), "{top}");
         assert_eq!(tail("abc", 10), "abc");
         assert_eq!(tail("路徑很長的目錄", 7), "…的目錄", "CJK counts two cells");
     }

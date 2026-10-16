@@ -367,6 +367,8 @@ claude-sessions tui [PATH]
 ```
 
 - Needs a terminal (stdin and stdout).
+- TUI timestamps use the system local timezone. Each list remembers its own sorting; original restores recently used projects first, newest sessions first, or memory index first.
+- Session counts, message counts, sizes, last-used times and memory counts refresh in the background every second, preserving the cursor, checked rows and reading position. Updates pause while menus, input or confirmation dialogs are open; `r` still reloads manually.
 - `PATH`: only show projects at or under this directory (default: all projects).
 - Lists every project (orphans in red; `MEM` counts memory files, and projects with only memory are listed too). `Enter` opens a menu for the directory: browse its sessions, browse its memory, open a shell or Claude Code there, or quit and `cd` there. `→` goes straight to the sessions; a session opens for reading.
 - `--cd-file FILE`: where "quit and cd here" writes the chosen directory (default: print it to stdout after leaving the TUI).
@@ -387,7 +389,7 @@ claude-sessions tui [PATH]
 | `Esc` / `←` | Back (`Esc` in the top view clears the filter, then quits; `←` never quits) |
 | `/` | Filter (`Enter` confirms, `Esc` clears) |
 | `o` | Orphans only |
-| `s` | Cycle sort: path, size, last used |
+| `s` | Open sorting for the current list: ↑↓ choose a column; `a` ascending, `d` descending, `o` original; Enter apply, Esc cancel |
 | `d` | Delete ticked rows (or the row under the cursor); confirm with `y`, cancel with `n` / `Esc`, `p` toggles `--purge-config` |
 | `m` / `c` | Move / copy the project directory (asks for the destination, runs `mv` / `cp`, then waits for `Enter`) |
 | `e` | Sessions view: export the session as Markdown (default file `<id>.md`). Memory view or reading a memory file: edit it in `$EDITOR` |

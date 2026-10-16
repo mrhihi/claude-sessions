@@ -23,7 +23,7 @@ impl Usage {
     }
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Clone)]
 pub struct SessionStat {
     pub id: String,
     pub title: Option<String>,

@@ -2,7 +2,7 @@
 //! and what a key press asks the outside world to do. Everything here is unit-testable.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -34,25 +34,55 @@ impl ProjectRow {
 
 /// Loads every project, or only those whose directory is `base` or under it.
 pub fn load(claude_dir: &Path, base: Option<&Path>) -> Result<Vec<ProjectRow>> {
-    let mut rows = Vec::new();
-    for p in list_all_projects(claude_dir)? {
-        if base.is_some_and(|b| strip_prefix_ci(&p.cwd, b).is_none()) {
-            continue;
+    Loader::default().load(claude_dir, base)
+}
+
+/// Reuse parsed sessions until their size or modification time changes.
+#[derive(Default)]
+pub struct Loader {
+    sessions: HashMap<PathBuf, (u64, std::time::SystemTime, SessionStat)>,
+}
+
+impl Loader {
+    pub fn load(&mut self, claude_dir: &Path, base: Option<&Path>) -> Result<Vec<ProjectRow>> {
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        for p in list_all_projects(claude_dir)? {
+            if base.is_some_and(|b| strip_prefix_ci(&p.cwd, b).is_none()) {
+                continue;
+            }
+            let mut sessions: Vec<SessionStat> = session_files(&p.dir).iter().map(|f| {
+                seen.insert(f.clone());
+                let stamp = std::fs::metadata(f).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+                if let Some((len, modified)) = stamp {
+                    if let Some((old_len, old_modified, stat)) = self.sessions.get(f) {
+                        if *old_len == len && *old_modified == modified {
+                            return stat.clone();
+                        }
+                    }
+                    let stat = analyze_session(f);
+                    self.sessions.insert(f.clone(), (len, modified, stat.clone()));
+                    stat
+                } else {
+                    self.sessions.remove(f);
+                    analyze_session(f)
+                }
+            }).collect();
+            sessions.sort_by(|a, b| b.last.cmp(&a.last));
+            rows.push(ProjectRow {
+                orphan: !p.cwd.exists(),
+                bytes: sessions.iter().map(|s| s.bytes).sum(),
+                messages: sessions.iter().map(|s| s.messages).sum(),
+                last: sessions.iter().filter_map(|s| s.last.clone()).max(),
+                sessions,
+                memory: memory::list(&p.dir),
+                dir: p.dir,
+                cwd: p.cwd,
+            });
         }
-        let mut sessions: Vec<SessionStat> = session_files(&p.dir).iter().map(|f| analyze_session(f)).collect();
-        sessions.sort_by(|a, b| b.last.cmp(&a.last));
-        rows.push(ProjectRow {
-            orphan: !p.cwd.exists(),
-            bytes: sessions.iter().map(|s| s.bytes).sum(),
-            messages: sessions.iter().map(|s| s.messages).sum(),
-            last: sessions.iter().filter_map(|s| s.last.clone()).max(),
-            sessions,
-            memory: memory::list(&p.dir),
-            dir: p.dir,
-            cwd: p.cwd,
-        });
+        self.sessions.retain(|path, _| seen.contains(path));
+        Ok(rows)
     }
-    Ok(rows)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +90,13 @@ pub enum Sort {
     Path,
     Size,
     LastUsed,
+    Sessions,
+    Memory,
+    Messages,
+    Id,
+    Title,
+    Kind,
+    Description,
 }
 
 impl Sort {
@@ -68,6 +105,30 @@ impl Sort {
             Sort::Path => "path",
             Sort::Size => "size",
             Sort::LastUsed => "last used",
+            Sort::Sessions => "sessions",
+            Sort::Memory => "memory",
+            Sort::Messages => "messages",
+            Sort::Id => "ID",
+            Sort::Title => "title",
+            Sort::Kind => "type",
+            Sort::Description => "description",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortOrder {
+    Original,
+    Ascending,
+    Descending,
+}
+
+impl SortOrder {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Ascending => "ascending ↑",
+            Self::Descending => "descending ↓",
         }
     }
 }
@@ -129,6 +190,7 @@ pub enum Mode {
     Notice(String),
     /// What to do with the directory of project `row` (index into `App::rows`).
     Menu { row: usize },
+    SortMenu { cursor: usize, order: SortOrder },
 }
 
 pub struct App {
@@ -139,6 +201,9 @@ pub struct App {
     pub proj: usize,
     pub selected: HashSet<String>,
     pub sort: Sort,
+    pub sort_order: SortOrder,
+    session_sort: (Sort, SortOrder),
+    memory_sort: (Sort, SortOrder),
     pub filter: String,
     pub only_orphans: bool,
     pub purge_config: bool,
@@ -164,7 +229,10 @@ impl App {
             cursor: 0,
             proj: 0,
             selected: HashSet::new(),
-            sort: Sort::Path,
+            sort: Sort::LastUsed,
+            sort_order: SortOrder::Original,
+            session_sort: (Sort::LastUsed, SortOrder::Original),
+            memory_sort: (Sort::Path, SortOrder::Original),
             filter: String::new(),
             only_orphans: false,
             purge_config: false,
@@ -175,6 +243,51 @@ impl App {
             view_dims: Cell::new((0, 0)),
             list_cursor: 0,
             memo: None,
+        }
+    }
+
+    /// Apply a background snapshot without losing navigation or checked rows.
+    pub fn refresh(&mut self, rows: Vec<ProjectRow>) {
+        let project = self.rows.get(self.proj).map(|p| p.dir.clone());
+        let reading = self.view;
+        if matches!(reading, View::Session | View::MemoryFile) {
+            self.view = if reading == View::Session { View::Sessions } else { View::Memory };
+            self.cursor = self.list_cursor;
+        }
+        let key = self.cursor_key();
+        self.rows = rows;
+        if self.view != View::Projects {
+            match project.and_then(|dir| self.rows.iter().position(|p| p.dir == dir)) {
+                Some(i) => self.proj = i,
+                None => {
+                    self.view = View::Projects;
+                    self.selected.clear();
+                    self.turns.clear();
+                    self.memo = None;
+                }
+            }
+        }
+        let keys = self.all_keys();
+        let position = key.and_then(|k| keys.iter().position(|v| *v == k));
+        if let Some(i) = position {
+            self.cursor = i;
+        }
+        self.clamp();
+        let valid: HashSet<String> = match self.view {
+            View::Projects => self.rows.iter().map(ProjectRow::key).collect(),
+            View::Sessions => self.rows.get(self.proj).map(|p| p.sessions.iter().map(|s| s.id.clone()).collect()).unwrap_or_default(),
+            View::Memory => self.rows.get(self.proj).map(|p| p.memory.iter().map(|m| m.file.clone()).collect()).unwrap_or_default(),
+            _ => HashSet::new(),
+        };
+        self.selected.retain(|k| valid.contains(k));
+        if matches!(reading, View::Session | View::MemoryFile) {
+            self.list_cursor = self.cursor;
+            if position.is_some() && self.view != View::Projects {
+                self.view = reading;
+            } else {
+                self.turns.clear();
+                self.memo = None;
+            }
         }
     }
 
@@ -214,11 +327,20 @@ impl App {
         let mut v: Vec<usize> = (0..self.rows.len())
             .filter(|i| (!self.only_orphans || self.rows[*i].orphan) && self.matches(&self.rows[*i].cwd.display().to_string()))
             .collect();
-        match self.sort {
-            Sort::Path => v.sort_by(|a, b| self.rows[*a].cwd.cmp(&self.rows[*b].cwd)),
-            Sort::Size => v.sort_by(|a, b| self.rows[*b].bytes.cmp(&self.rows[*a].bytes)),
-            Sort::LastUsed => v.sort_by(|a, b| self.rows[*b].last.cmp(&self.rows[*a].last)),
-        }
+        v.sort_by(|a, b| {
+            let (a, b) = (&self.rows[*a], &self.rows[*b]);
+            let field = if self.sort_order == SortOrder::Original { Sort::LastUsed } else { self.sort };
+            let cmp = match field {
+                Sort::Size => a.bytes.cmp(&b.bytes),
+                Sort::LastUsed => a.last.cmp(&b.last),
+                Sort::Sessions => a.sessions.len().cmp(&b.sessions.len()),
+                Sort::Memory => a.memory.len().cmp(&b.memory.len()),
+                Sort::Messages => a.messages.cmp(&b.messages),
+                _ => a.cwd.cmp(&b.cwd),
+            };
+            let cmp = if matches!(self.sort_order, SortOrder::Original | SortOrder::Descending) { cmp.reverse() } else { cmp };
+            cmp.then_with(|| a.cwd.cmp(&b.cwd))
+        });
         v
     }
 
@@ -231,14 +353,46 @@ impl App {
                 self.matches(&format!("{} {}", s.id, s.title.as_deref().unwrap_or("")))
             })
             .collect();
-        v.sort_by(|a, b| p.sessions[*b].last.cmp(&p.sessions[*a].last));
+        v.sort_by(|a, b| {
+            let (a, b) = (&p.sessions[*a], &p.sessions[*b]);
+            let (field, order) = self.session_sort;
+            let cmp = if order == SortOrder::Original {
+                b.last.cmp(&a.last)
+            } else {
+                let cmp = match field {
+                    Sort::Id => a.id.cmp(&b.id),
+                    Sort::Title => a.title.cmp(&b.title),
+                    Sort::Messages => a.messages.cmp(&b.messages),
+                    Sort::Size => a.bytes.cmp(&b.bytes),
+                    _ => a.last.cmp(&b.last),
+                };
+                if order == SortOrder::Descending { cmp.reverse() } else { cmp }
+            };
+            cmp.then_with(|| a.id.cmp(&b.id))
+        });
         v
     }
 
     /// Indices into the drilled project's `memory`.
     pub fn visible_memory(&self) -> Vec<usize> {
         let Some(p) = self.rows.get(self.proj) else { return vec![] };
-        (0..p.memory.len()).filter(|i| self.matches(&format!("{} {}", p.memory[*i].file, p.memory[*i].summary()))).collect()
+        let mut v: Vec<usize> = (0..p.memory.len()).filter(|i| self.matches(&format!("{} {}", p.memory[*i].file, p.memory[*i].summary()))).collect();
+        let (field, order) = self.memory_sort;
+        if order != SortOrder::Original {
+            v.sort_by(|a, b| {
+                let (a, b) = (&p.memory[*a], &p.memory[*b]);
+                let cmp = match field {
+                    Sort::Kind => a.kind.cmp(&b.kind),
+                    Sort::Description => a.summary().cmp(&b.summary()),
+                    Sort::Size => a.bytes.cmp(&b.bytes),
+                    Sort::LastUsed => a.modified.cmp(&b.modified),
+                    _ => a.file.cmp(&b.file),
+                };
+                let cmp = if order == SortOrder::Descending { cmp.reverse() } else { cmp };
+                cmp.then_with(|| a.file.cmp(&b.file))
+            });
+        }
+        v
     }
 
     fn memory_under_cursor(&self) -> Option<&MemoryFile> {
@@ -437,7 +591,75 @@ impl App {
                 None
             }
             Mode::Menu { row } => self.key_menu(row, key),
+            Mode::SortMenu { cursor, order } => { self.key_sort(cursor, order, key); None }
         }
+    }
+
+    pub fn sort_columns(&self) -> &'static [Sort] {
+        match self.view {
+            View::Projects => &[Sort::Path, Sort::Sessions, Sort::Memory, Sort::Messages, Sort::Size, Sort::LastUsed],
+            View::Sessions | View::Session => &[Sort::Id, Sort::Title, Sort::Messages, Sort::Size, Sort::LastUsed],
+            View::Memory | View::MemoryFile => &[Sort::Path, Sort::Kind, Sort::Description, Sort::Size, Sort::LastUsed],
+        }
+    }
+
+    fn current_sort(&self) -> (Sort, SortOrder) {
+        match self.view {
+            View::Projects => (self.sort, self.sort_order),
+            View::Sessions | View::Session => self.session_sort,
+            View::Memory | View::MemoryFile => self.memory_sort,
+        }
+    }
+
+    pub fn sort_label(&self) -> String {
+        let (field, order) = self.current_sort();
+        if order == SortOrder::Original {
+            format!("{} (original)", field.label())
+        } else {
+            format!("{} {}", field.label(), order.label())
+        }
+    }
+
+    fn open_sort(&mut self) {
+        let (field, order) = self.current_sort();
+        let cursor = self.sort_columns().iter().position(|s| *s == field).unwrap_or(0);
+        self.mode = Mode::SortMenu { cursor, order };
+    }
+
+    fn key_sort(&mut self, mut cursor: usize, mut order: SortOrder, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => { self.mode = Mode::Normal; return; }
+            KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1).min(self.sort_columns().len() - 1),
+            KeyCode::Up | KeyCode::Char('k') => cursor = cursor.saturating_sub(1),
+            KeyCode::Char('a') => order = SortOrder::Ascending,
+            KeyCode::Char('d') => order = SortOrder::Descending,
+            KeyCode::Char('o') => order = SortOrder::Original,
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => order = match order {
+                SortOrder::Original => SortOrder::Ascending,
+                SortOrder::Ascending => SortOrder::Descending,
+                SortOrder::Descending => SortOrder::Original,
+            },
+            KeyCode::Enter => {
+                let key = self.cursor_key();
+                let mut field = self.sort_columns()[cursor];
+                if order == SortOrder::Original {
+                    field = if matches!(self.view, View::Projects | View::Sessions) { Sort::LastUsed } else { Sort::Path };
+                }
+                match self.view {
+                    View::Projects => { self.sort = field; self.sort_order = order; }
+                    View::Sessions => self.session_sort = (field, order),
+                    View::Memory => self.memory_sort = (field, order),
+                    _ => {}
+                }
+                if let Some(position) = key.and_then(|k| self.all_keys().iter().position(|v| *v == k)) {
+                    self.cursor = position;
+                }
+                self.mode = Mode::Normal;
+                return;
+            }
+            _ => {}
+        }
+        self.mode = Mode::SortMenu { cursor, order };
     }
 
     fn key_menu(&mut self, row: usize, key: KeyEvent) -> Option<Effect> {
@@ -456,6 +678,7 @@ impl App {
                 self.mode = Mode::Normal;
                 self.open_memory(row);
             }
+            KeyCode::Char('o') => self.open_sort(),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('h') | KeyCode::Char('c') | KeyCode::Char('x') if orphan => {
                 self.mode = Mode::Normal;
@@ -661,13 +884,7 @@ impl App {
                 self.only_orphans = !self.only_orphans;
                 self.clamp();
             }
-            KeyCode::Char('s') => {
-                self.sort = match self.sort {
-                    Sort::Path => Sort::Size,
-                    Sort::Size => Sort::LastUsed,
-                    Sort::LastUsed => Sort::Path,
-                };
-            }
+            KeyCode::Char('s') => self.open_sort(),
             KeyCode::Enter if self.view == View::Projects => {
                 if let Some(i) = self.visible_projects().get(self.cursor).copied() {
                     self.mode = Mode::Menu { row: i };
@@ -740,11 +957,15 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(vec![
+        let mut app = App::new(vec![
             row("/b/beta", false, vec![sess("b1", "2026-02-01", 10), sess("b2", "2026-03-01", 20)]),
             row("/a/alpha", true, vec![sess("a1", "2026-01-01", 500)]),
             row("/c/gamma", false, vec![sess("c1", "2026-04-01", 5)]),
-        ])
+        ]);
+        // Navigation fixtures use explicit path order.
+        app.sort = Sort::Path;
+        app.sort_order = SortOrder::Ascending;
+        app
     }
 
     fn press(a: &mut App, keys: &str) -> Vec<Effect> {
@@ -807,16 +1028,25 @@ mod tests {
     }
 
     #[test]
-    fn sorts_cycle_and_order() {
-        let mut a = app();
+    fn sort_menu_applies_direction_and_restores_original() {
+        let mut a = App::new(app().rows);
+        assert_eq!(cwds(&a), ["/c/gamma", "/b/beta", "/a/alpha"]);
+        press(&mut a, "s");
+        assert!(matches!(a.mode, Mode::SortMenu { .. }));
+        press(&mut a, "kd");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.sort, a.sort_order), (Sort::Size, SortOrder::Descending));
         assert_eq!(cwds(&a), ["/a/alpha", "/b/beta", "/c/gamma"]);
-        press(&mut a, "s");
-        assert_eq!(a.sort, Sort::Size);
-        assert_eq!(cwds(&a), ["/a/alpha", "/b/beta", "/c/gamma"], "alpha 500 > beta 30 > gamma 5");
-        press(&mut a, "s");
-        assert_eq!(cwds(&a), ["/c/gamma", "/b/beta", "/a/alpha"], "newest first");
-        press(&mut a, "s");
-        assert_eq!(a.sort, Sort::Path);
+        press(&mut a, "sa");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!(cwds(&a), ["/c/gamma", "/b/beta", "/a/alpha"]);
+        press(&mut a, "so");
+        code(&mut a, KeyCode::Enter);
+        assert_eq!((a.sort, a.sort_order), (Sort::LastUsed, SortOrder::Original));
+        assert_eq!(cwds(&a), ["/c/gamma", "/b/beta", "/a/alpha"]);
+        press(&mut a, "sjd");
+        code(&mut a, KeyCode::Esc);
+        assert_eq!(a.sort_order, SortOrder::Original, "cancel keeps the active sort");
     }
 
     #[test]
@@ -994,7 +1224,10 @@ mod tests {
         r.memory = memory::list(&r.dir);
         let mut plain = row("/q", false, vec![sess("q1", "2026-01-01", 1)]);
         plain.dir = d.path().join("none");
-        (d, App::new(vec![r, plain]))
+        let mut app = App::new(vec![r, plain]);
+        app.sort = Sort::Path;
+        app.sort_order = SortOrder::Ascending;
+        (d, app)
     }
 
     #[test]
@@ -1083,7 +1316,8 @@ mod tests {
         code(&mut a, KeyCode::Esc);
         assert_eq!(cwds(&a)[a.cursor], "/c/gamma");
         code(&mut a, KeyCode::Right);
-        press(&mut a, "ss"); // last used: gamma moves to the top
+        a.sort = Sort::LastUsed;
+        a.sort_order = SortOrder::Descending; // project order changes while browsing sessions
         code(&mut a, KeyCode::Left);
         assert_eq!(cwds(&a)[a.cursor], "/c/gamma", "found again after a re-sort");
     }
