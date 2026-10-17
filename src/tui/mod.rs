@@ -125,7 +125,14 @@ fn perform(terminal: &mut DefaultTerminal, claude_dir: &Path, base: Option<&Path
             }
             None => "Project not found".into(),
         },
-        Effect::Move { src, dst } => outside(terminal, || mv::run(&mv::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_move_files: false, force: false }), true)?,
+        Effect::Move { src, dst } => outside(
+            terminal,
+            || {
+                let no_move_files = mv::effective_sessions_only(&src, false);
+                mv::run(&mv::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_move_files, force: false })
+            },
+            true,
+        )?,
         Effect::Copy { src, dst } => outside(terminal, || cp::run(&cp::Opts { claude_dir: claude_dir.to_path_buf(), src, dst: dst.into(), dry_run: false, no_copy_files: false }), true)?,
         Effect::EditMemory(path) => outside(terminal, || memory::open_in_editor(&path), false)?,
         Effect::DeleteMemory { dir, files } => match find(app, &dir) {

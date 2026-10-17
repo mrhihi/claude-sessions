@@ -163,7 +163,7 @@ Refuses when:
 
 | Situation | Fix |
 |---|---|
-| `SRC` is not a directory | Check the path (or use `--no-move-files` if it is gone) |
+| `SRC` is not a directory | Check the path (if it is gone, only the sessions are moved, as with `--no-move-files`) |
 | `DST` already exists | Pick another path (`--no-move-files` expects it to exist) |
 | `DST` is inside `SRC`, or both are the same | Pick another path |
 | A Claude Code process runs inside `SRC` or `DST` (they are listed) | Exit those sessions, or pass `--force` |

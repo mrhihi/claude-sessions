@@ -315,6 +315,7 @@ fn run(cli: Cli) -> Result<()> {
     };
     match cli.cmd {
         Some(Cmd::Mv { src, dst, dry_run, no_move_files, force }) => {
+            let no_move_files = mv::effective_sessions_only(&src, no_move_files);
             let dst = mv::resolve_dst(&src, dst, no_move_files)?;
             mv::run(&mv::Opts { claude_dir, src, dst, dry_run, no_move_files, force })
         }

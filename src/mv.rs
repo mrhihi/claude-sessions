@@ -447,6 +447,16 @@ pub fn resolve_dst(src: &Path, dst: PathBuf, sessions_only: bool) -> Result<Path
     Ok(inside)
 }
 
+/// A source directory that no longer exists is an orphaned session folder: there is
+/// nothing to move on disk, so only the sessions are re-homed (as with `--no-move-files`).
+pub fn effective_sessions_only(src: &Path, flag: bool) -> bool {
+    if !flag && !src.exists() {
+        eprintln!("{} {} no longer exists, only updating the sessions", style::bold_yellow("note:"), src.display());
+        return true;
+    }
+    flag
+}
+
 /// The closest directory at or above `p` that `~/.claude.json` marks as trusted
 /// (Claude's trust prompt is skipped when any parent is trusted).
 fn trusted_at_or_above(claude_dir: &Path, p: &Path) -> Option<PathBuf> {
@@ -549,6 +559,14 @@ mod tests {
         assert_eq!(trust_lost(&claude, a_b, out), Some(PathBuf::from("/a")));
         assert_eq!(trust_lost(&claude, a_b, inside), None);
         assert_eq!(trust_lost(&claude, own, out), None); // own trust moves with the key
+    }
+
+    #[test]
+    fn missing_source_means_sessions_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(effective_sessions_only(&tmp.path().join("gone"), false));
+        assert!(!effective_sessions_only(tmp.path(), false));
+        assert!(effective_sessions_only(tmp.path(), true));
     }
 
     #[test]

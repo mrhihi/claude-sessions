@@ -198,6 +198,20 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
+/// `text` as spans with the char at `cursor` (a space past the end) reversed as the caret,
+/// so the caret takes the place of a char instead of adding width.
+fn with_caret(text: &str, cursor: usize, style: Style) -> Vec<Span<'static>> {
+    let at = text.char_indices().nth(cursor).map_or(text.len(), |(b, _)| b);
+    let rest = &text[at..];
+    let n = rest.chars().next().map_or(0, char::len_utf8);
+    let under = if n == 0 { " " } else { &rest[..n] };
+    vec![
+        Span::styled(text[..at].to_string(), style),
+        Span::styled(under.to_string(), style.add_modifier(Modifier::REVERSED)),
+        Span::styled(rest[n..].to_string(), style),
+    ]
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Block::new().style(surface(TEXT, BACKGROUND)), f.area());
     let [head, body, foot] = Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
@@ -229,7 +243,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         title.push(Span::styled("  [orphans only]", ink(YELLOW)));
     }
     if !app.filter.is_empty() || app.mode == Mode::Filter {
-        title.push(Span::styled(format!("  /{}", app.filter), ink(GREEN)));
+        if app.mode == Mode::Filter {
+            title.push(Span::styled("  /", ink(GREEN)));
+            title.extend(with_caret(&app.filter, app.filter_cursor, ink(GREEN)));
+        } else {
+            title.push(Span::styled(format!("  /{}", app.filter), ink(GREEN)));
+        }
     }
     if !app.selected.is_empty() {
         title.push(Span::styled(format!("  {} ticked", app.selected.len()), ink(PURPLE)));
@@ -384,10 +403,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             let text = vec![Line::from(msg.as_str()).style(Style::new().add_modifier(Modifier::BOLD)), Line::from(""), Line::from("Nothing was deleted. Press any key to continue.").style(ink(YELLOW))];
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(dialog(" Not done ".into(), RED)), area);
         }
-        Mode::Input { label, text, .. } => {
+        Mode::Input { label, text, cursor, .. } => {
             let area = centered(f.area(), 80, 5);
             f.render_widget(Clear, area);
-            let lines = vec![Line::from(format!("{text}▏")), Line::from(""), Line::from("Enter confirm · Esc cancel").style(ink(MUTED))];
+            let lines = vec![Line::from(with_caret(text, *cursor, Style::new())), Line::from(""), Line::from("Enter confirm · Esc cancel").style(ink(MUTED))];
             f.render_widget(Paragraph::new(lines).block(dialog(format!(" {label} "), CYAN)), area);
         }
         Mode::Menu { row } => {

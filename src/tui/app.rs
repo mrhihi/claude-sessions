@@ -170,6 +170,38 @@ pub enum Effect {
     Cd(PathBuf),
 }
 
+/// Apply a text-editing key to `text` with the caret at char index `cursor`.
+fn edit_line(text: &mut String, cursor: &mut usize, key: KeyEvent) {
+    let len = text.chars().count();
+    *cursor = (*cursor).min(len);
+    let byte = |text: &str, i: usize| text.char_indices().nth(i).map_or(text.len(), |(b, _)| b);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Left => *cursor = cursor.saturating_sub(1),
+        KeyCode::Right => *cursor = (*cursor + 1).min(len),
+        KeyCode::Home => *cursor = 0,
+        KeyCode::End => *cursor = len,
+        KeyCode::Char('a') if ctrl => *cursor = 0,
+        KeyCode::Char('e') if ctrl => *cursor = len,
+        KeyCode::Char('u') if ctrl => {
+            text.drain(..byte(text, *cursor));
+            *cursor = 0;
+        }
+        KeyCode::Backspace if *cursor > 0 => {
+            *cursor -= 1;
+            text.remove(byte(text, *cursor));
+        }
+        KeyCode::Delete if *cursor < len => {
+            text.remove(byte(text, *cursor));
+        }
+        KeyCode::Char(c) if !ctrl => {
+            text.insert(byte(text, *cursor), c);
+            *cursor += 1;
+        }
+        _ => {}
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputKind {
     Move(PathBuf),
@@ -184,7 +216,7 @@ pub enum Mode {
     /// Typing the filter text.
     Filter,
     Confirm { question: String, effect: Effect },
-    Input { label: String, text: String, kind: InputKind },
+    Input { label: String, text: String, cursor: usize, kind: InputKind },
     Help,
     /// A message that must not be missed (a refused delete); any key dismisses it.
     Notice(String),
@@ -205,6 +237,8 @@ pub struct App {
     session_sort: (Sort, SortOrder),
     memory_sort: (Sort, SortOrder),
     pub filter: String,
+    /// Caret position in `filter`, in chars.
+    pub filter_cursor: usize,
     pub only_orphans: bool,
     pub purge_config: bool,
     pub mode: Mode,
@@ -234,6 +268,7 @@ impl App {
             session_sort: (Sort::LastUsed, SortOrder::Original),
             memory_sort: (Sort::Path, SortOrder::Original),
             filter: String::new(),
+            filter_cursor: 0,
             only_orphans: false,
             purge_config: false,
             mode: Mode::Normal,
@@ -497,14 +532,14 @@ impl App {
         } else {
             ("Copy to", InputKind::Copy(cwd.clone()))
         };
-        self.mode = Mode::Input { label: format!("{label} (from {})", cwd.display()), text: cwd.display().to_string(), kind };
+        self.mode = Mode::Input { label: format!("{label} (from {})", cwd.display()), text: cwd.display().to_string(), cursor: cwd.display().to_string().chars().count(), kind };
     }
 
     fn ask_export(&mut self) {
         if self.view == View::Memory {
             let Some(p) = self.rows.get(self.proj) else { return };
             let name = p.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
-            self.mode = Mode::Input { label: "Export memory to".into(), text: format!("{name}-memory.md"), kind: InputKind::ExportMemory(p.dir.clone()) };
+            self.mode = Mode::Input { label: "Export memory to".into(), text: format!("{name}-memory.md"), cursor: name.chars().count() + "-memory.md".len(), kind: InputKind::ExportMemory(p.dir.clone()) };
             return;
         }
         if self.view != View::Sessions {
@@ -516,6 +551,7 @@ impl App {
         self.mode = Mode::Input {
             label: "Export to".into(),
             text: format!("{id}.md"),
+            cursor: id.chars().count() + 3,
             kind: InputKind::Export { dir: p.dir.clone(), id },
         };
     }
@@ -530,11 +566,7 @@ impl App {
                         self.filter.clear();
                         self.mode = Mode::Normal;
                     }
-                    KeyCode::Backspace => {
-                        self.filter.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => self.filter.push(c),
-                    _ => {}
+                    _ => edit_line(&mut self.filter, &mut self.filter_cursor, key),
                 }
                 self.clamp();
                 None
@@ -558,7 +590,7 @@ impl App {
                 }
                 _ => None,
             },
-            Mode::Input { label, mut text, kind } => {
+            Mode::Input { label, mut text, mut cursor, kind } => {
                 match key.code {
                     KeyCode::Esc => self.mode = Mode::Normal,
                     KeyCode::Enter => {
@@ -574,15 +606,10 @@ impl App {
                             InputKind::ExportMemory(dir) => Effect::ExportMemory { dir, path: t },
                         });
                     }
-                    KeyCode::Backspace => {
-                        text.pop();
-                        self.mode = Mode::Input { label, text, kind };
+                    _ => {
+                        edit_line(&mut text, &mut cursor, key);
+                        self.mode = Mode::Input { label, text, cursor, kind };
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        text.push(c);
-                        self.mode = Mode::Input { label, text, kind };
-                    }
-                    _ => {}
                 }
                 None
             }
@@ -879,7 +906,10 @@ impl App {
                     self.selected.extend(all);
                 }
             }
-            KeyCode::Char('/') => self.mode = Mode::Filter,
+            KeyCode::Char('/') => {
+                self.filter_cursor = self.filter.chars().count();
+                self.mode = Mode::Filter;
+            }
             KeyCode::Char('o') => {
                 self.only_orphans = !self.only_orphans;
                 self.clamp();
@@ -1245,6 +1275,23 @@ mod tests {
         assert_eq!(a.visible_memory().len(), 2);
         code(&mut a, KeyCode::Left);
         assert_eq!(a.view, View::Projects);
+    }
+
+    #[test]
+    fn edit_line_moves_caret_and_edits_in_the_middle() {
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let (mut t, mut c) = ("ab中d".to_string(), 4);
+        edit_line(&mut t, &mut c, k(KeyCode::Left));
+        edit_line(&mut t, &mut c, k(KeyCode::Char('X')));
+        assert_eq!((t.as_str(), c), ("ab中Xd", 4));
+        edit_line(&mut t, &mut c, k(KeyCode::Backspace));
+        edit_line(&mut t, &mut c, k(KeyCode::Backspace));
+        assert_eq!((t.as_str(), c), ("abd", 2));
+        edit_line(&mut t, &mut c, k(KeyCode::Home));
+        edit_line(&mut t, &mut c, k(KeyCode::Delete));
+        assert_eq!((t.as_str(), c), ("bd", 0));
+        edit_line(&mut t, &mut c, k(KeyCode::End));
+        assert_eq!(c, 2);
     }
 
     #[test]
